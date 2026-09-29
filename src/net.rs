@@ -22,6 +22,7 @@ fn noise_err(e: snow::Error) -> io::Error {
 }
 
 /// True for a read that hit the timeout (Windows says TimedOut, Unix WouldBlock).
+#[cfg(test)]
 pub fn is_timeout(e: &io::Error) -> bool {
     matches!(e.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)
 }
@@ -62,7 +63,10 @@ fn write_frame(mut w: impl Write, data: &[u8]) -> io::Result<()> {
 
 fn read_frame(mut r: impl Read, buf: &mut [u8; 65535]) -> io::Result<usize> {
     let mut len = [0u8; 2];
-    r.read_exact(&mut len)?;
+    r.read_exact(&mut len).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => io::Error::new(e.kind(), "peer closed the connection"),
+        _ => e,
+    })?;
     let len = u16::from_le_bytes(len) as usize;
     r.read_exact(&mut buf[..len])?;
     Ok(len)
@@ -93,9 +97,11 @@ impl Sender {
         });
     }
 
-    /// Close both directions; the peer's reads end and our Receiver errors out.
+    /// Close our sending side after everything already written (TCP FIN). The
+    /// peer's reads end; our Receiver keeps working until the peer closes too,
+    /// which avoids the RST that closing with unread data would cause.
     pub fn shutdown(&self) {
-        let _ = self.out.lock().unwrap().0.shutdown(std::net::Shutdown::Both);
+        let _ = self.out.lock().unwrap().0.shutdown(std::net::Shutdown::Write);
     }
 }
 
@@ -118,6 +124,7 @@ impl Receiver {
         Msg::decode(&pt[..m]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))
     }
 
+    #[cfg(test)]
     pub fn set_timeout(&self, t: Duration) -> io::Result<()> {
         self.stream.set_read_timeout(Some(t))
     }
@@ -156,7 +163,9 @@ mod tests {
     use std::time::Instant;
 
     /// Handshake a client and a server over 127.0.0.1 with the given keys.
-    fn pair(ck: Key, sk: Key) -> (io::Result<(Sender, Receiver)>, io::Result<(Sender, Receiver)>) {
+    type End = io::Result<(Sender, Receiver)>;
+
+    fn pair(ck: Key, sk: Key) -> (End, End) {
         let l = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let server = thread::spawn(move || handshake(l.accept().unwrap().0, &sk, false));

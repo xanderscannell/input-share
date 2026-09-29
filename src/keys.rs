@@ -44,6 +44,12 @@ impl Held {
         }
     }
 
+    /// Is this scancode down, extended or not (left or right Ctrl, say)?
+    pub fn has_scancode(&self, scancode: u16) -> bool {
+        self.keys.iter().any(|&(s, _)| s == scancode)
+    }
+
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty() && self.buttons.is_empty()
     }
