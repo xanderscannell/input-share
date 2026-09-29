@@ -4,6 +4,7 @@ mod keys;
 mod net;
 mod proto;
 mod server;
+mod win;
 
 use edge::{Edge, Rect};
 use std::path::PathBuf;
@@ -14,6 +15,7 @@ const USAGE: &str = "usage:
   input-share server [--bind 0.0.0.0:24800] [--key key.hex] [--edge right|left]
                      [--script FILE --screen WxH]
   input-share client HOST[:PORT] [--key key.hex] [--edge right|left] [--dry-run --screen WxH]
+                     (without --dry-run the screen is read from Windows)
 
 --edge is the server's edge that leads to the client (default right); give both
 ends the same value.";
@@ -60,10 +62,13 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         Some("client") => {
             let host = args.get(1).filter(|h| !h.starts_with("--")).ok_or("client needs HOST")?;
-            if !args.iter().any(|a| a == "--dry-run") {
-                return Err("real injection is not built yet; use --dry-run".into());
+            if args.iter().any(|a| a == "--dry-run") {
+                client::run(host, load_key()?, edge, screen()?, &mut client::print_act)
             }
-            client::run(host, load_key()?, edge, screen()?, &mut client::print_act)
+            let key = load_key()?;
+            win::dpi_aware();
+            let screen = win::virtual_screen();
+            client::run(host, key, edge, screen, &mut client::send_input_sink(screen))
         }
         _ => Err(USAGE.into()),
     }
