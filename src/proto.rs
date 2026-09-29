@@ -2,7 +2,7 @@
 
 pub const VERSION: u16 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Button {
     Left = 0,
     Right = 1,
