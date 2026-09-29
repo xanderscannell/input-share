@@ -12,9 +12,12 @@ use crate::proto::{Button, Msg, VERSION};
 use std::io;
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Input {
@@ -201,16 +204,20 @@ fn accept_loop(listener: TcpListener, shared: Shared, key: Key, set_cursor: fn(i
 }
 
 /// Server with a scripted fake input source instead of hooks.
-pub fn run_script(bind: &str, key: Key, edge: Edge, desk: Rect, script: &Path) -> io::Result<()> {
-    let text = std::fs::read_to_string(script)?;
-    let cmds = parse_script(&text)?;
+/// Bind, then accept clients on a background thread.
+fn start(bind: &str, key: Key, edge: Edge, desk: Rect, set_cursor: fn(i32, i32)) -> io::Result<Shared> {
     let listener = TcpListener::bind(bind)?;
     println!("listening {}", listener.local_addr()?);
     let shared: Shared = Arc::new(Mutex::new(Server::new(edge, desk)));
-    {
-        let shared = shared.clone();
-        thread::spawn(move || accept_loop(listener, shared, key, |x, y| println!("cursor {x} {y}")));
-    }
+    let s = shared.clone();
+    thread::spawn(move || accept_loop(listener, s, key, set_cursor));
+    Ok(shared)
+}
+
+pub fn run_script(bind: &str, key: Key, edge: Edge, desk: Rect, script: &Path) -> io::Result<()> {
+    let text = std::fs::read_to_string(script)?;
+    let cmds = parse_script(&text)?;
+    let shared = start(bind, key, edge, desk, |x, y| println!("cursor {x} {y}"))?;
 
     for cmd in cmds {
         match cmd {
@@ -404,5 +411,121 @@ mod tests {
         for bad in ["move 1", "key zz down", "button left sideways", "wait forever", "jump"] {
             assert!(parse_script(bad).is_err(), "{bad}");
         }
+    }
+}
+
+// ---- Real input: low-level hooks. ----
+
+/// Translate a WH_MOUSE_LL event. `data` is MSLLHOOKSTRUCT.mouseData.
+fn mouse_event(msg: u32, x: i32, y: i32, data: u32) -> Option<Input> {
+    let hi = (data >> 16) as u16;
+    let button = |down| {
+        let button = if hi == XBUTTON1 { Button::X1 } else { Button::X2 };
+        Some(Input::Button { button, down })
+    };
+    match msg {
+        WM_MOUSEMOVE => Some(Input::Move { x, y }),
+        WM_LBUTTONDOWN => Some(Input::Button { button: Button::Left, down: true }),
+        WM_LBUTTONUP => Some(Input::Button { button: Button::Left, down: false }),
+        WM_RBUTTONDOWN => Some(Input::Button { button: Button::Right, down: true }),
+        WM_RBUTTONUP => Some(Input::Button { button: Button::Right, down: false }),
+        WM_MBUTTONDOWN => Some(Input::Button { button: Button::Middle, down: true }),
+        WM_MBUTTONUP => Some(Input::Button { button: Button::Middle, down: false }),
+        WM_XBUTTONDOWN => button(true),
+        WM_XBUTTONUP => button(false),
+        WM_MOUSEWHEEL => Some(Input::Wheel { vertical: true, delta: hi as i16 as i32 }),
+        WM_MOUSEHWHEEL => Some(Input::Wheel { vertical: false, delta: hi as i16 as i32 }),
+        _ => None,
+    }
+}
+
+/// Translate a WH_KEYBOARD_LL event from KBDLLHOOKSTRUCT's scanCode and flags.
+fn key_event(scan: u32, flags: KBDLLHOOKSTRUCT_FLAGS) -> Input {
+    Input::Key { scancode: scan as u16, extended: flags.contains(LLKHF_EXTENDED), down: !flags.contains(LLKHF_UP) }
+}
+
+static HOOKED: OnceLock<Shared> = OnceLock::new();
+
+/// Run the state machine for one hook event. Returns true to swallow it.
+/// Only ever takes the mutex briefly: the net thread holds it for no I/O.
+fn hook_verdict(ev: Input) -> bool {
+    let Some(shared) = HOOKED.get() else { return false };
+    let v = shared.lock().unwrap_or_else(|e| e.into_inner()).on_input(ev);
+    if let Some((x, y)) = v.cursor {
+        set_cursor(x, y);
+    }
+    !v.pass
+}
+
+fn set_cursor(x: i32, y: i32) {
+    let _ = unsafe { SetCursorPos(x, y) };
+}
+
+unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        // Skip injected events, our own SetCursorPos park included.
+        if info.flags & LLMHF_INJECTED == 0
+            && let Some(ev) = mouse_event(wparam.0 as u32, info.pt.x, info.pt.y, info.mouseData)
+            && hook_verdict(ev)
+        {
+            return LRESULT(1);
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+unsafe extern "system" fn key_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32 {
+        let info = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+        if !info.flags.contains(LLKHF_INJECTED) && hook_verdict(key_event(info.scanCode, info.flags)) {
+            return LRESULT(1);
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Real server: hooks on this thread with a message loop. Never returns on success.
+pub fn run_hooks(bind: &str, key: Key, edge: Edge, desk: Rect) -> io::Result<()> {
+    let shared = start(bind, key, edge, desk, set_cursor)?;
+    HOOKED.set(shared).map_err(|_| io::Error::other("hooks already running"))?;
+    unsafe {
+        let module = GetModuleHandleW(None).map_err(io::Error::other)?;
+        SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(module.into()), 0).map_err(io::Error::other)?;
+        SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_proc), Some(module.into()), 0).map_err(io::Error::other)?;
+        println!("hooks installed; panic hotkey is Ctrl+Alt+Shift+Esc");
+        // Hooks are called on this thread, from inside GetMessage.
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    #[test]
+    fn mouse_messages_translate() {
+        assert_eq!(mouse_event(WM_MOUSEMOVE, -5, 7, 0), Some(Input::Move { x: -5, y: 7 }));
+        assert_eq!(mouse_event(WM_RBUTTONUP, 0, 0, 0), Some(Input::Button { button: Button::Right, down: false }));
+        let x2 = (XBUTTON2 as u32) << 16;
+        assert_eq!(mouse_event(WM_XBUTTONDOWN, 0, 0, x2), Some(Input::Button { button: Button::X2, down: true }));
+        let x1 = (XBUTTON1 as u32) << 16;
+        assert_eq!(mouse_event(WM_XBUTTONUP, 0, 0, x1), Some(Input::Button { button: Button::X1, down: false }));
+        // Wheel delta is the signed high word: one notch toward the user is -120.
+        let down_notch = ((-120i16 as u16) as u32) << 16;
+        assert_eq!(mouse_event(WM_MOUSEWHEEL, 0, 0, down_notch), Some(Input::Wheel { vertical: true, delta: -120 }));
+        assert_eq!(mouse_event(WM_MOUSEHWHEEL, 0, 0, 240 << 16), Some(Input::Wheel { vertical: false, delta: 240 }));
+        assert_eq!(mouse_event(WM_KEYDOWN, 0, 0, 0), None);
+    }
+
+    #[test]
+    fn key_flags_translate() {
+        assert_eq!(key_event(0x1E, KBDLLHOOKSTRUCT_FLAGS(0)), Input::Key { scancode: 0x1E, extended: false, down: true });
+        assert_eq!(
+            key_event(0x1D, LLKHF_EXTENDED | LLKHF_UP),
+            Input::Key { scancode: 0x1D, extended: true, down: false }
+        );
     }
 }

@@ -13,7 +13,7 @@ use std::process::ExitCode;
 const USAGE: &str = "usage:
   input-share keygen [--key key.hex]
   input-share server [--bind 0.0.0.0:24800] [--key key.hex] [--edge right|left]
-                     [--script FILE --screen WxH]
+                     [--script FILE --screen WxH]   (without --script: real hooks)
   input-share client HOST[:PORT] [--key key.hex] [--edge right|left] [--dry-run --screen WxH]
                      (without --dry-run the screen is read from Windows)
 
@@ -55,10 +55,13 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         Some("server") => {
             let bind = flag(args, "--bind").unwrap_or(format!("0.0.0.0:{}", net::DEFAULT_PORT));
-            let Some(script) = flag(args, "--script") else {
-                return Err("real hooks are not built yet; use --script".into());
-            };
-            server::run_script(&bind, load_key()?, edge, screen()?, script.as_ref()).map_err(|e| e.to_string())
+            if let Some(script) = flag(args, "--script") {
+                return server::run_script(&bind, load_key()?, edge, screen()?, script.as_ref())
+                    .map_err(|e| e.to_string());
+            }
+            let key = load_key()?;
+            win::dpi_aware();
+            server::run_hooks(&bind, key, edge, win::virtual_screen()).map_err(|e| e.to_string())
         }
         Some("client") => {
             let host = args.get(1).filter(|h| !h.starts_with("--")).ok_or("client needs HOST")?;
