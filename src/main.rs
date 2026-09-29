@@ -2,6 +2,7 @@
 
 mod edge;
 mod keys;
+mod net;
 mod proto;
 
 fn main() {}
