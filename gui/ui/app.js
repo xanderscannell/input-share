@@ -236,7 +236,9 @@ function onStatus({ kind, detail }) {
       // Also taken when sharing started from outside this window (tray, demo).
       if (!ui.role) Object.assign(ui, { role: "server", screen: "sharing" });
       ui.conn = "waiting";
-      ui.addr = detail;
+      // start_sharing returns the LAN address (192.168.x.y); the event only
+      // knows the bind address (0.0.0.0), so never let it overwrite.
+      if (!ui.addr) ui.addr = detail;
       break;
     case "connecting":
       if (!ui.role) Object.assign(ui, { role: "client", screen: "client" });

@@ -14,12 +14,12 @@ use input_share_core::layout::Layout;
 use input_share_core::net::{self, Key};
 use input_share_core::server::{self, ServerHandle};
 use input_share_core::status::{OnStatus, Status};
+use input_share_core::win;
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 const DEMO_SCREEN: Rect = Rect { left: 0, top: 0, w: 1920, h: 1080 };
-const NOT_YET: &str = "Real sharing arrives in a later build. Run with --demo to try the interface.";
 
 /// Status as the web UI receives it (a Tauri event payload).
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -82,6 +82,7 @@ pub struct Backend {
     server: Option<ServerHandle>,
     client: Option<ClientHandle>,
     listener: Option<Listener>,
+    announcer: Option<Announcer>,
     peers: Option<DemoPeers>,
 }
 
@@ -89,9 +90,28 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// This machine's LAN address, to show the other computer where to connect.
+/// A UDP "connect" only picks the outgoing interface; no packet is sent.
+fn lan_ip() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?; // TEST-NET-1: never routed, never contacted
+    s.local_addr().ok().map(|a| a.ip()).filter(|ip| !ip.is_unspecified())
+}
+
 impl Backend {
     pub fn new(home: Home, demo: bool, demo_state: Option<String>, theme: Option<String>, on_status: OnStatus) -> Self {
-        Backend { home, demo, demo_state, theme, on_status, server: None, client: None, listener: None, peers: None }
+        Backend {
+            home,
+            demo,
+            demo_state,
+            theme,
+            on_status,
+            server: None,
+            client: None,
+            listener: None,
+            announcer: None,
+            peers: None,
+        }
     }
 
     fn key(&self) -> Result<Key, String> {
@@ -127,31 +147,55 @@ impl Backend {
     }
 
     pub fn start_sharing(&mut self) -> Result<String, String> {
-        if !self.demo {
-            return Err(NOT_YET.into());
-        }
         if self.server.is_some() {
             return Err("Already sharing.".into());
         }
         let key = self.key()?;
-        let s = server::start("127.0.0.1:0", key, self.edge(), Layout::single(DEMO_SCREEN), false, self.on_status.clone())
-            .map_err(err)?;
-        let addr = s.local_addr().to_string();
+        if self.demo {
+            let s = server::start("127.0.0.1:0", key, self.edge(), Layout::single(DEMO_SCREEN), false, self.on_status.clone())
+                .map_err(err)?;
+            let addr = s.local_addr().to_string();
+            self.server = Some(s);
+            return Ok(addr);
+        }
+
+        // Real: hooks on, listening on the LAN, beaconing so clients can find us.
+        let port = self.port();
+        let s = server::start(&format!("0.0.0.0:{port}"), key, self.edge(), win::layout(), true, self.on_status.clone())
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::AddrInUse => format!("Port {port} is already in use. Choose another in Settings."),
+                _ => e.to_string(),
+            })?;
+        let beacon = Beacon { port, fingerprint: discovery::fingerprint(&key), hostname: discovery::hostname() };
+        let broadcast = SocketAddr::from(([255, 255, 255, 255], discovery::DISCOVERY_PORT));
+        // Discovery is a convenience: if beaconing fails, typing the address still works.
+        self.announcer = discovery::announce("0.0.0.0:0".parse().unwrap(), broadcast, beacon).ok();
         self.server = Some(s);
-        Ok(addr)
+        Ok(match lan_ip() {
+            Some(ip) => format!("{ip}:{port}"),
+            None => format!("port {port}"),
+        })
     }
 
     pub fn stop_sharing(&mut self) {
+        self.announcer = None; // Drop stops it
         if let Some(s) = self.server.take() {
             s.stop();
         }
     }
 
     pub fn start_browsing(&mut self) -> Result<(), String> {
-        if !self.demo {
-            return Err(NOT_YET.into());
-        }
         if self.listener.is_some() {
+            return Ok(());
+        }
+        if !self.demo {
+            let bind = SocketAddr::from(([0, 0, 0, 0], discovery::DISCOVERY_PORT));
+            self.listener = Some(discovery::listen(bind).map_err(|e| match e.kind() {
+                std::io::ErrorKind::AddrInUse => {
+                    "Another program is using the discovery port. Type the other computer's address instead.".to_string()
+                }
+                _ => e.to_string(),
+            })?);
             return Ok(());
         }
         let key = self.key()?;
@@ -202,20 +246,15 @@ impl Backend {
     }
 
     pub fn connect(&mut self, addr: &str) -> Result<(), String> {
-        if !self.demo {
-            return Err(NOT_YET.into());
-        }
         self.disconnect();
         let key = self.key()?;
         addr.parse::<SocketAddr>().map_err(|_| format!("{addr} is not an address like 192.168.1.20:24800."))?;
-        let c = client::start(
-            addr,
-            key,
-            self.edge(),
-            Box::new(|| Layout::single(DEMO_SCREEN)),
-            Box::new(|_| {}), // demo: input goes nowhere
-            self.on_status.clone(),
-        );
+        let (layout, sink): (client::LayoutFn, client::BoxSink) = if self.demo {
+            (Box::new(|| Layout::single(DEMO_SCREEN)), Box::new(|_| {})) // demo: input goes nowhere
+        } else {
+            (Box::new(win::layout), Box::new(client::send_input_sink()))
+        };
+        let c = client::start(addr, key, self.edge(), layout, sink, self.on_status.clone());
         self.client = Some(c);
         let mut cfg = self.home.load_config().map_err(err)?;
         cfg.set(config::HOST, addr).map_err(err)?;
