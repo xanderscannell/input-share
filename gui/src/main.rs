@@ -189,6 +189,9 @@ fn main() {
                 }
                 home
             } else {
+                // If an earlier run crashed while the parked cursor was hidden,
+                // bring it back now rather than only when sharing starts.
+                input_share_core::cursor::restore();
                 Home::user()?
             };
             let handle = app.handle().clone();

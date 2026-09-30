@@ -286,9 +286,27 @@ pub fn start(bind: &str, key: Key, edge: Edge, layout: Layout, hooks: bool, on_s
 
     let (status_tx, status_rx) = mpsc::channel();
     shared.lock().unwrap().status = Some(status_tx);
+    // Real mode hides the parked cursor while Remote. Restore first, in case an
+    // earlier run crashed with it hidden. The pump does it (never the hook):
+    // disconnect, the panic hotkey and stop all report Local through here, and
+    // the pump ending (stop, drop) restores whatever is left.
+    if hooks {
+        crate::cursor::restore();
+    }
     let pump = {
         let on_status = on_status.clone();
-        thread::spawn(move || status_rx.into_iter().for_each(|s| on_status(s)))
+        let mut gate = hooks.then(crate::cursor::CursorGate::default);
+        thread::spawn(move || {
+            for s in status_rx {
+                if let Some(a) = gate.as_mut().and_then(|g| g.on_status(&s)) {
+                    crate::cursor::apply(a);
+                }
+                on_status(s);
+            }
+            if let Some(a) = gate.as_mut().and_then(|g| g.finish()) {
+                crate::cursor::apply(a);
+            }
+        })
     };
     let set_cursor: fn(i32, i32) = if hooks { set_cursor_pos } else { |x, y| println!("cursor {x} {y}") };
     // On error, `shared` drops here, which drops the status sender and ends the pump.
