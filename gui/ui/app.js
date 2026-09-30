@@ -217,11 +217,15 @@ function render() {
   syncTray(status);
 }
 
-// The tray shows the same thing as the desk diagram: idle, pointer here, or away.
+// The tray shows the same picture as the desk diagram: which screen is lit,
+// on the same side the diagram draws it (renderDesk has just set otherSide).
 let trayShown = "";
 function syncTray(status) {
   const running = ui.role && ui.conn !== "idle";
-  const state = !running ? "idle" : ui.conn === "connected" && ui.pointer === "other" ? "away" : "here";
+  const thisSide = $("#desk").dataset.otherSide === "right" ? "left" : "right";
+  const otherSide = thisSide === "left" ? "right" : "left";
+  const away = ui.conn === "connected" && ui.pointer === "other";
+  const state = !running ? "idle" : away ? `away-${otherSide}` : `here-${thisSide}`;
   const tooltip = running ? `input-share: ${status}` : "input-share: not sharing";
   if (state + tooltip === trayShown) return;
   trayShown = state + tooltip;

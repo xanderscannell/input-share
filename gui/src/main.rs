@@ -77,13 +77,16 @@ fn save_settings(app: State<App>, edge: String, port: u16) -> Result<(), String>
     lock(&app).save_settings(&edge, port)
 }
 
-/// The web UI knows the whole state (role and where the pointer is), so it
-/// tells the tray what to show: "idle", "here" or "away".
+/// The web UI knows the whole state (role, where the pointer is, and which
+/// side each computer is drawn on), so it tells the tray what to show:
+/// "idle", or "here-" / "away-" plus the side of the lit screen.
 #[tauri::command]
 fn tray_state(app: tauri::AppHandle, state: String, tooltip: String) -> Result<(), String> {
     let icon = match state.as_str() {
-        "here" => include_bytes!("../icons/tray-here.png").as_slice(),
-        "away" => include_bytes!("../icons/tray-away.png").as_slice(),
+        "here-left" => include_bytes!("../icons/tray-here-left.png").as_slice(),
+        "here-right" => include_bytes!("../icons/tray-here-right.png").as_slice(),
+        "away-left" => include_bytes!("../icons/tray-away-left.png").as_slice(),
+        "away-right" => include_bytes!("../icons/tray-away-right.png").as_slice(),
         _ => include_bytes!("../icons/tray-idle.png").as_slice(),
     };
     let tray = app.tray_by_id(TRAY).ok_or("no tray icon")?;

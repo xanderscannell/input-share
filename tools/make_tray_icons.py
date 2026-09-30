@@ -1,6 +1,10 @@
-# Draw the three tray icons (32x32 RGBA PNG) as a tiny version of the app's
-# desk diagram: two screens side by side, the one with the pointer lit.
-#   idle: both outlines. here: this (left) screen teal. away: other (right) amber.
+# Draw the tray icons (32x32 RGBA PNG) as a tiny version of the app's desk
+# diagram: two screens side by side, the one with the pointer lit.
+#   idle: both outlines.
+#   here-left / here-right: this computer's screen teal, on that side.
+#   away-left / away-right: the other computer's screen amber, on that side.
+# The window picks the variant that matches its own diagram, which puts this
+# computer on whichever side Settings says.
 # Stdlib only. Run: python tools/make_tray_icons.py gui/icons
 import struct
 import sys
@@ -74,7 +78,13 @@ def png(rows):
 
 
 out = sys.argv[1]
-for name, fills in [("idle", [None, None]), ("here", [TEAL, None]), ("away", [None, AMBER])]:
+for name, fills in [
+    ("idle", [None, None]),
+    ("here-left", [TEAL, None]),
+    ("here-right", [None, TEAL]),
+    ("away-left", [AMBER, None]),
+    ("away-right", [None, AMBER]),
+]:
     with open(f"{out}/tray-{name}.png", "wb") as f:
         f.write(png(render(fills)))
     print(f"wrote {out}/tray-{name}.png")
