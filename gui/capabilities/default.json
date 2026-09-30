@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "The main window may call the app's commands and listen for status events.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

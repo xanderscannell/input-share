@@ -1660,6 +1660,7 @@ dependencies = [
 name = "input-share-gui"
 version = "0.1.0"
 dependencies = [
+ "input-share-core",
  "serde",
  "serde_json",
  "tauri",

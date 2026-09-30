@@ -1,0 +1,295 @@
+/* input-share: a software KVM switch. Indicator-lamp palette: teal when the
+   pointer is on this computer, amber when it is away. Everything offline. */
+
+:root {
+  color-scheme: light;
+  --ground: #e6ecef;
+  --surface: #f6f8f9;
+  --ink: #1f2b33;
+  --muted: #5a6a75;
+  --line: #c5d0d6;
+  --here: #0b7a63;
+  --here-lit: #d3ebe4;
+  --away: #a85a05;
+  --away-lit: #f3e2cc;
+  --danger: #b3261e;
+  --focus: #1a5fb4;
+  --on-ink: #f6f8f9;
+
+  --font: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #141a1f;
+    --surface: #1c242b;
+    --ink: #e2e8ec;
+    --muted: #94a4af;
+    --line: #34414b;
+    --here: #3cd3ae;
+    --here-lit: #173a33;
+    --away: #f0a445;
+    --away-lit: #3d2c14;
+    --danger: #ff8a80;
+    --focus: #8ab4f8;
+    --on-ink: #141a1f;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #141a1f;
+  --surface: #1c242b;
+  --ink: #e2e8ec;
+  --muted: #94a4af;
+  --line: #34414b;
+  --here: #3cd3ae;
+  --here-lit: #173a33;
+  --away: #f0a445;
+  --away-lit: #3d2c14;
+  --danger: #ff8a80;
+  --focus: #8ab4f8;
+  --on-ink: #141a1f;
+}
+
+* { box-sizing: border-box; }
+
+/* Classes like .alert set display, which would otherwise beat [hidden]. */
+[hidden] { display: none !important; }
+
+html, body { margin: 0; height: 100%; }
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font: 14px/1.45 var(--font);
+  display: flex;
+  flex-direction: column;
+}
+
+button, input, textarea { font: inherit; color: inherit; }
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.mono { font-family: var(--font-mono); font-size: 13px; }
+
+/* ---- Header ---- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 20px;
+}
+
+.bar button {
+  background: none;
+  border: 0;
+  padding: 4px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.wordmark { font-weight: 600; letter-spacing: 0.01em; margin-left: -6px; }
+
+.bar-nav { display: flex; gap: 4px; }
+.bar-nav button { color: var(--muted); }
+.bar-nav button:hover, .bar-nav button[aria-current="page"] { color: var(--ink); }
+.bar-nav button[aria-current="page"] { text-decoration: underline; text-underline-offset: 4px; }
+
+main { flex: 1; overflow-y: auto; padding: 4px 20px 24px; }
+
+/* ---- The desk diagram: the one bold element ---- */
+
+.desk { margin: 4px 0 18px; }
+.desk svg { display: block; width: 100%; height: auto; overflow: visible; }
+
+.screen .panel {
+  fill: var(--surface);
+  stroke: var(--ink);
+  stroke-width: 2;
+  transition: fill 0.35s ease, opacity 0.35s ease;
+}
+.screen .stand { fill: var(--line); }
+
+/* The screen that has the pointer is lit; the other is plain. */
+.desk[data-pointer="this"] .this .panel { fill: var(--here-lit); }
+.desk[data-pointer="other"] .other .panel { fill: var(--away-lit); }
+.desk[data-pointer="other"] .this .panel { opacity: 0.55; }
+
+/* No other computer yet: a dashed outline waits for it. */
+.desk[data-mode="solo"] .other { display: none; }
+.desk[data-mode="waiting"] .other .panel { fill: none; stroke: var(--muted); stroke-dasharray: 6 6; }
+.desk[data-mode="waiting"] .other .stand { fill: none; stroke: var(--muted); stroke-dasharray: 4 4; }
+
+.pointer path {
+  fill: var(--here);
+  stroke: var(--surface);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  transition: fill 0.35s ease;
+}
+.desk[data-pointer="other"] .pointer path { fill: var(--away); }
+.pointer { transition: transform 0.45s cubic-bezier(0.3, 0.7, 0.2, 1); }
+
+/* Screens are centered at 25% and 75% of the width, so two centered columns
+   put each label under its screen. Alone, this computer sits in the middle. */
+.desk-labels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+.desk[data-mode="solo"] .desk-labels { grid-template-columns: 1fr; }
+.desk[data-mode="solo"] .label-other { display: none; }
+.desk[data-other-side="left"] .label-this { order: 2; }
+.desk-labels span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 6px; }
+.desk[data-pointer="this"] .label-this, .desk[data-pointer="other"] .label-other { color: var(--ink); font-weight: 600; }
+
+/* ---- Status sentence ---- */
+
+.state { margin-bottom: 18px; }
+.status {
+  font: 600 22px/1.2 var(--font-display);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.detail { margin: 6px 0 0; color: var(--muted); max-width: 40ch; }
+
+.alert {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  margin-bottom: 18px;
+  border-left: 3px solid var(--danger);
+  background: var(--surface);
+}
+.alert svg { width: 18px; height: 18px; flex: none; margin-top: 1px; fill: none; stroke: var(--danger); stroke-width: 2; stroke-linecap: round; }
+.alert p { margin: 0; }
+
+/* ---- Home choices ---- */
+
+.choices { display: grid; gap: 10px; }
+
+.choice {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  column-gap: 14px;
+  text-align: left;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.choice:hover { border-color: var(--ink); }
+.choice svg { grid-row: span 2; width: 48px; fill: none; stroke: var(--ink); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.choice svg .faint { stroke: var(--muted); stroke-dasharray: 3 3; }
+.choice-title { font-weight: 600; }
+.choice-note { color: var(--muted); }
+
+/* ---- Facts, fingerprint, hints ---- */
+
+.facts { margin: 0 0 12px; }
+.facts div { display: grid; grid-template-columns: 76px 1fr; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); }
+.facts div:last-child { border-bottom: 1px solid var(--line); }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; }
+
+.fingerprint { font-family: var(--font-mono); font-size: 15px; }
+.fingerprint span + span { margin-left: 0.6em; }
+.fingerprint.big { font-size: 22px; margin: 4px 0 8px; letter-spacing: 0.02em; }
+
+.hint { color: var(--muted); margin: 0 0 16px; max-width: 44ch; }
+
+/* ---- Buttons ---- */
+
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 14px;
+  border: 1px solid var(--ink);
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+}
+.btn:hover { background: var(--surface); }
+.btn.primary { background: var(--ink); color: var(--on-ink); }
+.btn.primary:hover { opacity: 0.9; }
+/* A <label> styled as a button: undo the form-label rules below. */
+form label.btn.file { display: inline-flex; font-weight: 400; margin: 0; }
+.btn.file input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.btn.file:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* ---- Host list ---- */
+
+.hosts { list-style: none; margin: 0 0 12px; padding: 0; border-top: 1px solid var(--line); }
+.hosts li { border-bottom: 1px solid var(--line); }
+
+.host {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  row-gap: 2px;
+  text-align: left;
+  padding: 10px 4px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.host:hover:not([aria-disabled="true"]) { background: var(--surface); }
+.host[aria-disabled="true"] { cursor: default; }
+.host-name { font-weight: 600; }
+.host-addr { color: var(--muted); grid-column: 1; }
+.host-key { grid-row: 1 / span 2; grid-column: 2; align-self: center; display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
+.host-key svg { width: 14px; height: 14px; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.host-key.paired { color: var(--here); }
+.host-key.paired svg { stroke: var(--here); }
+.host-key:not(.paired) svg { stroke: var(--muted); }
+
+.empty { color: var(--muted); margin: 0 0 16px; }
+
+/* ---- Forms ---- */
+
+form label, legend { display: block; font-weight: 600; margin-bottom: 6px; padding: 0; }
+fieldset { border: 0; padding: 0; margin: 0 0 16px; }
+fieldset .hint { margin-bottom: 0; }
+
+input[type="text"], input:not([type]), input[inputmode], textarea {
+  width: 100%;
+  padding: 7px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+input:focus-visible, textarea:focus-visible { border-color: var(--focus); }
+textarea { resize: none; }
+
+.row { display: flex; gap: 8px; align-items: center; }
+.row input { flex: 1; }
+.manual, .import { margin-top: 8px; }
+.import textarea { margin-bottom: 8px; }
+.settings input[inputmode] { width: 9ch; margin-bottom: 16px; }
+
+.seg { display: inline-flex; border: 1px solid var(--ink); border-radius: 6px; overflow: hidden; margin-bottom: 8px; }
+.seg label { margin: 0; font-weight: 400; cursor: pointer; }
+.seg input { position: absolute; opacity: 0; }
+.seg span { display: block; padding: 7px 14px; }
+.seg label + label span { border-left: 1px solid var(--ink); }
+.seg input:checked + span { background: var(--ink); color: var(--on-ink); }
+.seg input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: -4px; }
+
+.confirm { border-left: 3px solid var(--away); padding: 2px 0 2px 12px; margin-bottom: 16px; }
+.confirm p { margin: 0 0 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pointer, .screen .panel, .pointer path { transition: none; }
+}

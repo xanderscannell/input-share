@@ -2,9 +2,151 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>input-share</title>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <h1>input-share</h1>
+  <header class="bar">
+    <button class="wordmark" type="button" data-go="home">input-share</button>
+    <nav class="bar-nav" aria-label="Setup">
+      <button type="button" data-go="keys">Key</button>
+      <button type="button" data-go="settings">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- The desk: this computer, the other one, and where the pointer is. -->
+    <figure class="desk" id="desk" data-mode="solo" data-pointer="this" data-other-side="right">
+      <svg viewBox="0 0 400 138" aria-hidden="true" focusable="false">
+        <g class="screen this" id="screen-this">
+          <rect class="panel" x="0" y="0" width="168" height="104" rx="10"/>
+          <path class="stand" d="M72 104 h24 l6 18 h-36 z"/>
+        </g>
+        <g class="screen other" id="screen-other">
+          <rect class="panel" x="0" y="0" width="168" height="104" rx="10"/>
+          <path class="stand" d="M72 104 h24 l6 18 h-36 z"/>
+        </g>
+        <g class="pointer" id="pointer">
+          <path d="M0 0 L0 22 L6 16 L10.5 26 L14.5 24.2 L10 14.5 L18 14.5 Z"/>
+        </g>
+      </svg>
+      <figcaption class="desk-labels">
+        <span class="label-this">This computer</span>
+        <span class="label-other" id="label-other"></span>
+      </figcaption>
+    </figure>
+
+    <section class="state" aria-live="polite">
+      <h1 class="status" id="status"></h1>
+      <p class="detail" id="detail"></p>
+    </section>
+
+    <div class="alert" id="alert" role="alert" hidden>
+      <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="9"/><path d="M10 5.5v5.5M10 13.5v1"/></svg>
+      <p id="alert-text"></p>
+    </div>
+
+    <div id="view"></div>
+  </main>
+
+  <!-- Screens. Filled with textContent only: hostnames come from the network. -->
+
+  <template id="t-home">
+    <div class="choices">
+      <button type="button" class="choice" data-act="share">
+        <svg viewBox="0 0 48 32" aria-hidden="true"><rect x="1" y="4" width="20" height="14" rx="2"/><rect x="27" y="4" width="20" height="14" rx="2" class="faint"/><path d="M13 11h20m-5-4 5 4-5 4"/></svg>
+        <span class="choice-title">Share this keyboard and mouse</span>
+        <span class="choice-note">They will also control a computer next to this one.</span>
+      </button>
+      <button type="button" class="choice" data-act="browse">
+        <svg viewBox="0 0 48 32" aria-hidden="true"><rect x="1" y="4" width="20" height="14" rx="2" class="faint"/><rect x="27" y="4" width="20" height="14" rx="2"/><path d="M13 11h20m-5-4 5 4-5 4"/></svg>
+        <span class="choice-title">Use another computer's keyboard and mouse</span>
+        <span class="choice-note">Control this computer from one next to it.</span>
+      </button>
+    </div>
+  </template>
+
+  <template id="t-sharing">
+    <dl class="facts">
+      <div><dt>Address</dt><dd class="mono" data-slot="addr"></dd></div>
+      <div><dt>Key</dt><dd class="fingerprint" data-slot="fp"></dd></div>
+    </dl>
+    <p class="hint" data-slot="hint"></p>
+    <div class="actions"><button type="button" class="btn primary" data-act="stop-sharing">Stop sharing</button></div>
+  </template>
+
+  <template id="t-browsing">
+    <ul class="hosts" data-slot="hosts" aria-label="Computers sharing on this network"></ul>
+    <p class="empty" data-slot="empty">Looking for computers that are sharing. Start sharing on the other computer and it will appear here.</p>
+    <form class="manual" data-act="connect-manual">
+      <label for="manual-addr">Or type its address</label>
+      <div class="row">
+        <input id="manual-addr" class="mono" name="addr" placeholder="192.168.1.20:24800" autocomplete="off" spellcheck="false">
+        <button type="submit" class="btn">Connect</button>
+      </div>
+    </form>
+  </template>
+
+  <template id="t-host">
+    <li>
+      <button type="button" class="host" data-act="connect">
+        <span class="host-name" data-slot="name"></span>
+        <span class="host-addr mono" data-slot="addr"></span>
+        <span class="host-key" data-slot="key"></span>
+      </button>
+    </li>
+  </template>
+
+  <template id="t-client">
+    <dl class="facts">
+      <div><dt>Computer</dt><dd data-slot="name"></dd></div>
+      <div><dt>Key</dt><dd class="fingerprint" data-slot="fp"></dd></div>
+    </dl>
+    <p class="hint" data-slot="hint"></p>
+    <div class="actions"><button type="button" class="btn primary" data-act="disconnect">Disconnect</button></div>
+  </template>
+
+  <template id="t-keys">
+    <p class="fingerprint big" data-slot="fp"></p>
+    <p class="hint" data-slot="hint"></p>
+    <div class="confirm" data-slot="confirm" hidden>
+      <p>A new key disconnects the other computer until you copy the new key to it.</p>
+      <div class="actions">
+        <button type="button" class="btn primary" data-act="key-replace">Replace key</button>
+        <button type="button" class="btn" data-act="key-keep">Keep current key</button>
+      </div>
+    </div>
+    <div class="actions" data-slot="key-actions">
+      <button type="button" class="btn" data-act="key-new">Make a new key</button>
+      <button type="button" class="btn" data-act="key-reveal">Show key file</button>
+    </div>
+    <form class="import" data-act="key-import">
+      <label for="key-text">Import the key from your other computer</label>
+      <textarea id="key-text" class="mono" rows="2" spellcheck="false" placeholder="Paste the 64 characters from its key.hex"></textarea>
+      <div class="row">
+        <label class="btn file">Choose key.hex<input type="file" accept=".hex,.txt" data-act="key-file"></label>
+        <button type="submit" class="btn primary">Import key</button>
+      </div>
+    </form>
+  </template>
+
+  <template id="t-settings">
+    <form class="settings" data-act="save-settings">
+      <fieldset>
+        <legend>Where is the other computer?</legend>
+        <div class="seg">
+          <label><input type="radio" name="edge" value="left"><span>To the left</span></label>
+          <label><input type="radio" name="edge" value="right"><span>To the right</span></label>
+        </div>
+        <p class="hint">Use the same answer on both computers, from the sharing computer's point of view.</p>
+      </fieldset>
+      <label for="port">Port</label>
+      <input id="port" name="port" class="mono" inputmode="numeric" pattern="[0-9]*">
+      <div class="actions"><button type="submit" class="btn primary">Save settings</button></div>
+    </form>
+  </template>
+
+  <script src="app.js"></script>
 </body>
 </html>

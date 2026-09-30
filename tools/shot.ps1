@@ -22,8 +22,15 @@ try {
   while ($p.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200; $p.Refresh() }
   if ($p.MainWindowHandle -eq 0) { throw "no window appeared" }
   Start-Sleep -Milliseconds $WaitMs   # let the webview render
+  # The first handle can be a tiny transient window; wait for the real one.
   $r = New-Object W+RECT
-  [void][W]::GetWindowRect($p.MainWindowHandle, [ref]$r)
+  do {
+    $p.Refresh()
+    [void][W]::GetWindowRect($p.MainWindowHandle, [ref]$r)
+    if (($r.R - $r.L) -ge 100) { break }
+    Start-Sleep -Milliseconds 200
+  } while ((Get-Date) -lt $deadline)
+  if (($r.R - $r.L) -lt 100) { throw "window never reached a real size ($($r.R - $r.L) px wide)" }
   $bmp = New-Object System.Drawing.Bitmap ($r.R - $r.L), ($r.B - $r.T)
   $g = [System.Drawing.Graphics]::FromImage($bmp)
   $hdc = $g.GetHdc()
