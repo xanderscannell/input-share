@@ -291,7 +291,8 @@ textarea { resize: none; }
 .confirm { border-left: 3px solid var(--away); padding: 2px 0 2px 12px; margin-bottom: 16px; }
 
 /* Settings while a session runs: say why, and show the controls as off. */
-.locked { border-left: 3px solid var(--muted); padding: 2px 0 2px 12px; margin: 0 0 16px; }
+/* Amber like the other "wait, read this" notes; ink text keeps it legible. */
+.locked { border-left: 3px solid var(--away); background: var(--away-lit); padding: 8px 12px; margin: 0 0 16px; }
 .settings :disabled, .settings :disabled + span { cursor: not-allowed; }
 /* Not the radios: they stay invisible (opacity 0); their labels dim instead. */
 .settings input:disabled:not([type="radio"]), .settings button:disabled, .seg input:disabled + span { opacity: 0.5; }
