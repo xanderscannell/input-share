@@ -263,6 +263,12 @@ impl Backend {
         self.home.save_config(&c).map_err(err)
     }
 
+    /// Sharing or connected (or trying to connect): closing the window should
+    /// hide it to the tray instead of quitting.
+    pub fn is_running(&self) -> bool {
+        self.server.is_some() || self.client.is_some()
+    }
+
     /// Stop everything (window closed or app quitting).
     pub fn shutdown(&mut self) {
         self.disconnect();
@@ -300,10 +306,13 @@ mod tests {
     #[test]
     fn demo_sharing_starts_and_stops() {
         let (mut b, log, dir) = demo();
+        assert!(!b.is_running());
         let addr = b.start_sharing().unwrap();
         assert!(addr.starts_with("127.0.0.1:"), "{addr}");
+        assert!(b.is_running(), "closing the window must now hide it to the tray");
         assert!(b.start_sharing().is_err(), "second start must be refused");
         b.stop_sharing();
+        assert!(!b.is_running());
         let kinds: Vec<_> = log.lock().unwrap().iter().map(|e| e.kind).collect();
         assert_eq!(kinds.first(), Some(&"listening"));
         assert_eq!(kinds.last(), Some(&"stopped"));

@@ -214,6 +214,18 @@ function render() {
   $("#alert-text").textContent = ui.error;
   renderDesk();
   renderView();
+  syncTray(status);
+}
+
+// The tray shows the same thing as the desk diagram: idle, pointer here, or away.
+let trayShown = "";
+function syncTray(status) {
+  const running = ui.role && ui.conn !== "idle";
+  const state = !running ? "idle" : ui.conn === "connected" && ui.pointer === "other" ? "away" : "here";
+  const tooltip = running ? `input-share: ${status}` : "input-share: not sharing";
+  if (state + tooltip === trayShown) return;
+  trayShown = state + tooltip;
+  invoke("tray_state", { state, tooltip }).catch(() => {});
 }
 
 // ---- Status events from the backend ----
@@ -221,10 +233,13 @@ function render() {
 function onStatus({ kind, detail }) {
   switch (kind) {
     case "listening":
+      // Also taken when sharing started from outside this window (tray, demo).
+      if (!ui.role) Object.assign(ui, { role: "server", screen: "sharing" });
       ui.conn = "waiting";
       ui.addr = detail;
       break;
     case "connecting":
+      if (!ui.role) Object.assign(ui, { role: "client", screen: "client" });
       ui.conn = "connecting";
       break;
     case "retrying":
@@ -417,6 +432,12 @@ const CANNED = {
     Object.assign(ui, canned);
   } else {
     await tauri.event.listen("status", (e) => onStatus(e.payload));
+    // Stop from the tray menu: everything has stopped; go back home.
+    await tauri.event.listen("tray-stop", () => {
+      clearInterval(hostTimer);
+      Object.assign(ui, { role: null, conn: "idle", screen: "home", pointer: "this", peer: "", addr: "", error: "" });
+      render();
+    });
   }
   // Skip the pointer's glide on first paint.
   const pointer = $("#pointer");

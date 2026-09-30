@@ -6,7 +6,10 @@ mod backend;
 use backend::{Backend, Boot, HostView, StatusEvent};
 use input_share_core::config::Home;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager, State};
+use tauri::image::Image;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent};
 
 struct App(Mutex<Backend>);
 
@@ -74,6 +77,95 @@ fn save_settings(app: State<App>, edge: String, port: u16) -> Result<(), String>
     lock(&app).save_settings(&edge, port)
 }
 
+/// The web UI knows the whole state (role and where the pointer is), so it
+/// tells the tray what to show: "idle", "here" or "away".
+#[tauri::command]
+fn tray_state(app: tauri::AppHandle, state: String, tooltip: String) -> Result<(), String> {
+    let icon = match state.as_str() {
+        "here" => include_bytes!("../icons/tray-here.png").as_slice(),
+        "away" => include_bytes!("../icons/tray-away.png").as_slice(),
+        _ => include_bytes!("../icons/tray-idle.png").as_slice(),
+    };
+    let tray = app.tray_by_id(TRAY).ok_or("no tray icon")?;
+    tray.set_icon(Some(Image::from_bytes(icon).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
+    tray.set_tooltip(Some(tooltip)).map_err(|e| e.to_string())
+}
+
+const TRAY: &str = "main";
+
+fn show_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// The tray menu's actions. Demo mode drives the same function.
+fn tray_action(app: &AppHandle, id: &str) {
+    match id {
+        "show" => show_window(app),
+        "stop" => {
+            lock(&app.state::<App>()).shutdown();
+            let _ = app.emit("tray-stop", ());
+        }
+        "quit" => {
+            lock(&app.state::<App>()).shutdown(); // release everything before exiting
+            app.exit(0);
+        }
+        _ => {}
+    }
+}
+
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show input-share", true, None::<&str>)?;
+    let stop = MenuItem::with_id(app, "stop", "Stop", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &stop, &quit])?;
+    TrayIconBuilder::with_id(TRAY)
+        .icon(Image::from_bytes(include_bytes!("../icons/tray-idle.png"))?)
+        .tooltip("input-share: not sharing")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, e| tray_action(app, e.id.as_ref()))
+        .on_tray_icon_event(|tray, e| {
+            if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = e {
+                show_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+/// `--demo-tray stop|close-show|close-idle`: drive the tray and window the
+/// way a user would, so screenshots can check the result. Demo only.
+fn demo_tray(app: AppHandle, sequence: String) {
+    let pause = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
+    let window = || app.get_webview_window("main");
+    pause(800);
+    if sequence != "close-idle" {
+        let _ = lock(&app.state::<App>()).start_sharing();
+    }
+    pause(800);
+    match sequence.as_str() {
+        "stop" => {
+            // Hold the sharing view long enough to be captured before the stop.
+            pause(1900);
+            tray_action(&app, "stop");
+        }
+        "close-show" | "close-idle" => {
+            if let Some(w) = window() {
+                let _ = w.close(); // goes through CloseRequested, like the title bar's X
+            }
+            pause(800);
+            if sequence == "close-show" {
+                tray_action(&app, "show");
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Value after `--name`, if present.
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
@@ -84,9 +176,11 @@ fn main() {
     let demo = args.iter().any(|a| a == "--demo");
     let demo_state = flag(&args, "--demo-state");
     let theme = flag(&args, "--demo-theme").filter(|t| t == "light" || t == "dark");
+    let demo_tray_seq = flag(&args, "--demo-tray").filter(|_| demo);
 
     tauri::Builder::default()
         .setup(move |app| {
+            build_tray(app)?;
             let home = if demo {
                 // Demo never touches the real %APPDATA% folder.
                 let home = Home::at(std::env::temp_dir().join("input-share-demo"))?;
@@ -102,6 +196,10 @@ fn main() {
                 let _ = handle.emit("status", StatusEvent::from(s));
             });
             app.manage(App(Mutex::new(Backend::new(home, demo, demo_state, theme, on_status))));
+            if let Some(seq) = demo_tray_seq.clone() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || demo_tray(handle, seq));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -116,14 +214,26 @@ fn main() {
             key_generate,
             key_import,
             key_reveal,
-            save_settings
+            save_settings,
+            tray_state
         ])
         .on_window_event(|window, event| {
-            // Closing the window stops everything cleanly (item 7 adds the tray).
-            if let tauri::WindowEvent::Destroyed = event {
-                lock(&window.state::<App>()).shutdown();
+            // While sharing or connected, the close button hides to the tray;
+            // while idle it quits.
+            if let WindowEvent::CloseRequested { api, .. } = event
+                && lock(&window.state::<App>()).is_running()
+            {
+                api.prevent_close();
+                let _ = window.hide();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("failed to start the GUI");
+        .build(tauri::generate_context!())
+        .expect("failed to start the GUI")
+        .run(|app, event| {
+            // Every way out (last window closed, tray Quit, logoff) stops
+            // cleanly: the client releases keys, the server unhooks.
+            if let RunEvent::Exit = event {
+                lock(&app.state::<App>()).shutdown();
+            }
+        });
 }
