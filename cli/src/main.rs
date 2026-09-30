@@ -1,7 +1,9 @@
 use input_share_core::edge::{Edge, Rect};
+use input_share_core::status::{OnStatus, Status};
 use input_share_core::{client, net, server, win};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 const USAGE: &str = "usage:
   input-share keygen [--key key.hex]
@@ -27,6 +29,26 @@ fn parse_screen(s: &str) -> Result<Rect, String> {
     Ok(Rect { left: 0, top: 0, w, h })
 }
 
+/// Status lines on stdout (the e2e test reads them), details on stderr.
+fn print_status() -> OnStatus {
+    Arc::new(|s| match s {
+        Status::Listening(addr) => println!("listening {addr}"),
+        Status::Connected(_) => println!("connected"),
+        Status::Disconnected(reason) => {
+            eprintln!("session ended: {reason}");
+            println!("disconnected");
+        }
+        Status::Retrying(why) => eprintln!("connect {why}"),
+        Status::Connecting(_) | Status::Remote | Status::Local | Status::Stopped => {}
+    })
+}
+
+fn park_forever() -> ! {
+    loop {
+        std::thread::park();
+    }
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     let key_path = PathBuf::from(flag(args, "--key").unwrap_or("key.hex".into()));
     let edge = match flag(args, "--edge").as_deref() {
@@ -49,22 +71,24 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("server") => {
             let bind = flag(args, "--bind").unwrap_or(format!("0.0.0.0:{}", net::DEFAULT_PORT));
             if let Some(script) = flag(args, "--script") {
-                return server::run_script(&bind, load_key()?, edge, screen()?, script.as_ref())
+                return server::run_script(&bind, load_key()?, edge, screen()?, script.as_ref(), print_status())
                     .map_err(|e| e.to_string());
             }
             let key = load_key()?;
             win::dpi_aware();
-            server::run_hooks(&bind, key, edge, win::virtual_screen()).map_err(|e| e.to_string())
+            server::run_hooks(&bind, key, edge, win::virtual_screen(), print_status()).map_err(|e| e.to_string())
         }
         Some("client") => {
             let host = args.get(1).filter(|h| !h.starts_with("--")).ok_or("client needs HOST")?;
-            if args.iter().any(|a| a == "--dry-run") {
-                client::run(host, load_key()?, edge, screen()?, &mut client::print_act)
-            }
-            let key = load_key()?;
-            win::dpi_aware();
-            let screen = win::virtual_screen();
-            client::run(host, key, edge, screen, &mut client::send_input_sink(screen))
+            let _client = if args.iter().any(|a| a == "--dry-run") {
+                client::start(host, load_key()?, edge, screen()?, Box::new(client::print_act), print_status())
+            } else {
+                let key = load_key()?;
+                win::dpi_aware();
+                let screen = win::virtual_screen();
+                client::start(host, key, edge, screen, Box::new(client::send_input_sink(screen)), print_status())
+            };
+            park_forever()
         }
         _ => Err(USAGE.into()),
     }

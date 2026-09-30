@@ -6,11 +6,13 @@ use crate::edge::{ClientCursor, Edge, Rect, Step};
 use crate::keys::Held;
 use crate::net::{self, Key};
 use crate::proto::{Button, Msg, VERSION};
+use crate::status::{OnStatus, Status};
 use std::io;
-use std::net::TcpStream;
-use std::sync::{LazyLock, Mutex};
-use std::thread;
-use std::time::Duration;
+use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 use windows::core::BOOL;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
@@ -25,6 +27,9 @@ pub enum Act {
 }
 
 pub type Sink<'a> = &'a mut dyn FnMut(Act);
+
+/// An owned sink the client thread can take with it.
+pub type BoxSink = Box<dyn FnMut(Act) + Send>;
 
 /// The `--dry-run` sink: one line per injected event.
 pub fn print_act(a: Act) {
@@ -134,29 +139,92 @@ fn release_all(held: &mut Held, sink: Sink) {
     }
 }
 
-/// Connect to `addr` forever, reconnecting with backoff. Never returns.
-pub fn run(addr: &str, key: Key, edge: Edge, screen: Rect, sink: Sink) -> ! {
+/// A running client. `stop()` (or dropping it) closes the connection, which
+/// runs release-all, and ends the reconnect loop.
+pub struct ClientHandle {
+    stop: Arc<AtomicBool>,
+    /// The live connection, so `stop()` can break a blocking read.
+    sock: Arc<Mutex<Option<TcpStream>>>,
+    thread: Option<JoinHandle<()>>,
+    on_status: OnStatus,
+}
+
+/// Connect to `addr` (default port if none given) and reconnect with backoff
+/// until stopped.
+pub fn start(addr: &str, key: Key, edge: Edge, screen: Rect, mut sink: BoxSink, on_status: OnStatus) -> ClientHandle {
     let addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:{}", net::DEFAULT_PORT) };
-    let mut backoff = Duration::from_millis(250);
-    loop {
-        match TcpStream::connect(&addr) {
-            Ok(stream) => {
-                backoff = Duration::from_millis(250);
-                if let Err(e) = session(stream, &key, edge, screen, sink) {
-                    eprintln!("session ended: {e}");
+    let stop = Arc::new(AtomicBool::new(false));
+    let sock = Arc::new(Mutex::new(None::<TcpStream>));
+    let thread = {
+        let (stop, sock, on_status) = (stop.clone(), sock.clone(), on_status.clone());
+        thread::spawn(move || {
+            let mut backoff = Duration::from_millis(250);
+            while !stop.load(Ordering::SeqCst) {
+                on_status(Status::Connecting(addr.clone()));
+                match connect(&addr) {
+                    Ok(stream) => {
+                        backoff = Duration::from_millis(250);
+                        *sock.lock().unwrap() = stream.try_clone().ok();
+                        // stop() may have run before the socket was stored.
+                        if stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let reason = match session(stream, &key, edge, screen, &mut *sink, &on_status) {
+                            Ok(()) => "closed".to_string(),
+                            Err(e) => e.to_string(),
+                        };
+                        *sock.lock().unwrap() = None;
+                        on_status(Status::Disconnected(reason));
+                    }
+                    Err(e) => on_status(Status::Retrying(format!("{addr}: {e}"))),
                 }
-                println!("disconnected");
+                // Sleep in small steps so stop() is not held up by the backoff.
+                let until = Instant::now() + backoff;
+                while Instant::now() < until && !stop.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(5));
             }
-            Err(e) => eprintln!("connect {addr}: {e}"),
+        })
+    };
+    ClientHandle { stop, sock, thread: Some(thread), on_status }
+}
+
+/// Connect with a timeout: a plain connect to an unreachable LAN host can hang
+/// for about 20 s on Windows.
+// ponytail: a connect in flight cannot be interrupted, so stop() can wait up to
+// this timeout; a non-blocking connect polled against the stop flag if that lag matters.
+fn connect(addr: &str) -> io::Result<TcpStream> {
+    let sa = addr.to_socket_addrs()?.next().ok_or_else(|| io::Error::other("address did not resolve"))?;
+    TcpStream::connect_timeout(&sa, Duration::from_secs(2))
+}
+
+impl ClientHandle {
+    pub fn stop(mut self) {
+        self.shutdown();
+    }
+
+    fn shutdown(&mut self) {
+        let Some(thread) = self.thread.take() else { return };
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(s) = &*self.sock.lock().unwrap() {
+            let _ = s.shutdown(Shutdown::Both);
         }
-        thread::sleep(backoff);
-        backoff = (backoff * 2).min(Duration::from_secs(5));
+        let _ = thread.join();
+        (self.on_status)(Status::Stopped);
     }
 }
 
-fn session(stream: TcpStream, key: &Key, edge: Edge, screen: Rect, sink: Sink) -> io::Result<()> {
+impl Drop for ClientHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn session(stream: TcpStream, key: &Key, edge: Edge, screen: Rect, sink: Sink, on_status: &OnStatus) -> io::Result<()> {
+    let peer = stream.peer_addr()?;
     let (tx, mut rx) = net::handshake(stream, key, true)?;
-    println!("connected");
+    on_status(Status::Connected(peer.to_string()));
     tx.send(&Msg::Hello { version: VERSION, w: screen.w, h: screen.h })?;
     tx.spawn_heartbeat(net::HEARTBEAT);
 
@@ -176,6 +244,9 @@ fn session(stream: TcpStream, key: &Key, edge: Edge, screen: Rect, sink: Sink) -
                 let (x, y) = c.pos();
                 println!("enter {x} {y}");
                 sink(Act::MoveTo(x, y));
+                if cursor.is_none() {
+                    on_status(Status::Remote);
+                }
                 cursor = Some(c);
             }
             Msg::MouseMove { dx, dy } => {
@@ -185,6 +256,7 @@ fn session(stream: TcpStream, key: &Key, edge: Edge, screen: Rect, sink: Sink) -
                     Step::Leave(y_frac) => {
                         println!("leave {y_frac:.3}");
                         cursor = None;
+                        on_status(Status::Local);
                         release_all(&mut held, sink);
                         if let Err(e) = tx.send(&Msg::Leave { y_frac }) {
                             break Err(e);
@@ -199,6 +271,9 @@ fn session(stream: TcpStream, key: &Key, edge: Edge, screen: Rect, sink: Sink) -
             _ => {}
         }
     };
+    if cursor.is_some() {
+        on_status(Status::Local);
+    }
     release_all(&mut held, sink);
     tx.shutdown();
     res

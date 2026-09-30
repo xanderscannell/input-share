@@ -9,14 +9,17 @@ use crate::edge::{self, Edge, Rect};
 use crate::keys::Held;
 use crate::net::{self, Key};
 use crate::proto::{Button, Msg, VERSION};
+use crate::status::{OnStatus, Status};
 use std::io;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::thread;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -55,13 +58,31 @@ pub struct Server {
     local: Held,
     /// Everything physically down, for the panic hotkey.
     phys: Held,
-    /// A session thread is running (set by `session`).
-    live: bool,
+    /// Remote/Local changes, drained by a pump thread: `on_input` runs inside
+    /// the hook and must never call out to a status callback directly.
+    status: Option<mpsc::Sender<Status>>,
 }
 
 impl Server {
     pub fn new(edge: Edge, desk: Rect) -> Self {
-        Server { edge, desk, remote: false, out: None, local: Held::default(), phys: Held::default(), live: false }
+        Server {
+            edge,
+            desk,
+            remote: false,
+            out: None,
+            local: Held::default(),
+            phys: Held::default(),
+            status: None,
+        }
+    }
+
+    fn set_remote(&mut self, remote: bool) {
+        if self.remote != remote {
+            self.remote = remote;
+            if let Some(s) = &self.status {
+                let _ = s.send(if remote { Status::Remote } else { Status::Local });
+            }
+        }
     }
 
     fn center(&self) -> (i32, i32) {
@@ -93,7 +114,7 @@ impl Server {
             match ev {
                 Input::Move { x, y } if self.out.is_some() && edge::server_hit(self.edge, self.desk, x) => {
                     self.send(Msg::Enter { y_frac: self.desk.y_frac(y) });
-                    self.remote = true;
+                    self.set_remote(true);
                     return Verdict { pass: false, cursor: Some(self.center()) };
                 }
                 Input::Key { scancode, extended, down } => {
@@ -132,13 +153,13 @@ impl Server {
         if !self.remote {
             return None;
         }
-        self.remote = false;
+        self.set_remote(false);
         Some(edge::server_return_point(self.edge, self.desk, y_frac))
     }
 
     /// Force Local and end the session (its writer thread drains and closes).
     pub fn disconnect(&mut self) {
-        self.remote = false;
+        self.set_remote(false);
         self.out = None;
     }
 }
@@ -146,7 +167,15 @@ impl Server {
 type Shared = Arc<Mutex<Server>>;
 
 /// One client session. Returns when the connection ends, for any reason.
-fn session(shared: &Shared, stream: TcpStream, key: &Key, set_cursor: &dyn Fn(i32, i32)) -> io::Result<()> {
+fn session(
+    shared: &Shared,
+    stream: TcpStream,
+    key: &Key,
+    set_cursor: fn(i32, i32),
+    stop: &AtomicBool,
+    on_status: &OnStatus,
+) -> io::Result<()> {
+    let peer = stream.peer_addr()?;
     let (tx, mut rx) = net::handshake(stream, key, false)?;
     let desk = shared.lock().unwrap().desk;
     tx.send(&Msg::Hello { version: VERSION, w: desk.w, h: desk.h })?;
@@ -166,10 +195,14 @@ fn session(shared: &Shared, stream: TcpStream, key: &Key, set_cursor: &dyn Fn(i3
     };
     {
         let mut s = shared.lock().unwrap();
+        // `stop()` sets the flag before taking this lock, so checking it here
+        // under the lock means a stopping server never starts a session.
+        if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         s.out = Some(out);
-        s.live = true;
     }
-    println!("connected");
+    on_status(Status::Connected(peer.to_string()));
 
     let res = loop {
         match rx.recv() {
@@ -188,75 +221,152 @@ fn session(shared: &Shared, stream: TcpStream, key: &Key, set_cursor: &dyn Fn(i3
     };
     shared.lock().unwrap().disconnect();
     let _ = writer.join();
-    shared.lock().unwrap().live = false;
-    println!("disconnected");
     res
 }
 
-fn accept_loop(listener: TcpListener, shared: Shared, key: Key, set_cursor: fn(i32, i32)) {
+fn accept_loop(
+    listener: TcpListener,
+    shared: Shared,
+    key: Key,
+    set_cursor: fn(i32, i32),
+    stop: Arc<AtomicBool>,
+    on_status: OnStatus,
+) {
     // ponytail: one client at a time; a second connection waits until the first ends.
-    for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
-        if let Err(e) = session(&shared, stream, &key, &set_cursor) {
-            eprintln!("session ended: {e}");
+    // The listener is non-blocking so this loop can notice `stop` between clients.
+    while !stop.load(Ordering::SeqCst) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let reason = match stream.set_nonblocking(false) {
+                    Ok(()) => match session(&shared, stream, &key, set_cursor, &stop, &on_status) {
+                        Ok(()) => "closed".to_string(),
+                        Err(e) => e.to_string(),
+                    },
+                    Err(e) => e.to_string(),
+                };
+                on_status(Status::Disconnected(reason));
+            }
+            Err(_) => thread::sleep(Duration::from_millis(50)),
         }
+    }
+}
+
+/// A running server. `stop()` (or dropping it) ends the session, unhooks,
+/// frees the port and joins every thread it started.
+pub struct ServerHandle {
+    shared: Shared,
+    addr: SocketAddr,
+    stop: Arc<AtomicBool>,
+    accept: Option<JoinHandle<()>>,
+    pump: Option<JoinHandle<()>>,
+    hooks: Option<(u32, JoinHandle<()>)>,
+    on_status: OnStatus,
+}
+
+/// Bind and accept clients on a background thread. With `hooks`, also install
+/// the low-level hooks (real input); without, feed input through `input()`.
+pub fn start(bind: &str, key: Key, edge: Edge, desk: Rect, hooks: bool, on_status: OnStatus) -> io::Result<ServerHandle> {
+    let listener = TcpListener::bind(bind)?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?;
+    let shared: Shared = Arc::new(Mutex::new(Server::new(edge, desk)));
+
+    let (status_tx, status_rx) = mpsc::channel();
+    shared.lock().unwrap().status = Some(status_tx);
+    let pump = {
+        let on_status = on_status.clone();
+        thread::spawn(move || status_rx.into_iter().for_each(|s| on_status(s)))
+    };
+    let set_cursor: fn(i32, i32) = if hooks { set_cursor_pos } else { |x, y| println!("cursor {x} {y}") };
+    // On error, `shared` drops here, which drops the status sender and ends the pump.
+    let hooks = if hooks { Some(spawn_hooks(shared.clone())?) } else { None };
+
+    on_status(Status::Listening(addr.to_string()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let accept = {
+        let (shared, stop, on_status) = (shared.clone(), stop.clone(), on_status.clone());
+        thread::spawn(move || accept_loop(listener, shared, key, set_cursor, stop, on_status))
+    };
+    Ok(ServerHandle { shared, addr, stop, accept: Some(accept), pump: Some(pump), hooks, on_status })
+}
+
+impl ServerHandle {
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Feed one input event (scripts and demo mode; hooks call `on_input` themselves).
+    pub fn input(&self, ev: Input) -> Verdict {
+        self.shared.lock().unwrap().on_input(ev)
+    }
+
+    pub fn stop(mut self) {
+        self.shutdown();
+    }
+
+    fn shutdown(&mut self) {
+        let Some(accept) = self.accept.take() else { return };
+        self.stop.store(true, Ordering::SeqCst);
+        // Local first, then unhook, so the user has their input back at once.
+        self.shared.lock().unwrap().disconnect();
+        if let Some((thread_id, hook_thread)) = self.hooks.take() {
+            let _ = unsafe { PostThreadMessageW(thread_id, WM_QUIT, WPARAM(0), LPARAM(0)) };
+            let _ = hook_thread.join();
+        }
+        let _ = accept.join(); // waits for the session to drain and close
+        self.shared.lock().unwrap().status = None; // ends the pump
+        if let Some(pump) = self.pump.take() {
+            let _ = pump.join();
+        }
+        (self.on_status)(Status::Stopped);
+    }
+
+    fn wait(&self, w: Wait) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let ok = {
+                let s = self.shared.lock().unwrap();
+                match w {
+                    Wait::Connected => s.out.is_some(),
+                    Wait::Remote => s.remote,
+                    Wait::Local => !s.remote,
+                }
+            };
+            if ok {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, format!("script: wait {w:?} timed out")));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
 /// Server with a scripted fake input source instead of hooks.
-/// Bind, then accept clients on a background thread.
-fn start(bind: &str, key: Key, edge: Edge, desk: Rect, set_cursor: fn(i32, i32)) -> io::Result<Shared> {
-    let listener = TcpListener::bind(bind)?;
-    println!("listening {}", listener.local_addr()?);
-    let shared: Shared = Arc::new(Mutex::new(Server::new(edge, desk)));
-    let s = shared.clone();
-    thread::spawn(move || accept_loop(listener, s, key, set_cursor));
-    Ok(shared)
-}
-
-pub fn run_script(bind: &str, key: Key, edge: Edge, desk: Rect, script: &Path) -> io::Result<()> {
-    let text = std::fs::read_to_string(script)?;
-    let cmds = parse_script(&text)?;
-    let shared = start(bind, key, edge, desk, |x, y| println!("cursor {x} {y}"))?;
-
+pub fn run_script(bind: &str, key: Key, edge: Edge, desk: Rect, script: &Path, on_status: OnStatus) -> io::Result<()> {
+    let cmds = parse_script(&std::fs::read_to_string(script)?)?;
+    let server = start(bind, key, edge, desk, false, on_status)?;
     for cmd in cmds {
         match cmd {
             Cmd::Input(ev) => {
-                let v = shared.lock().unwrap().on_input(ev);
-                if let Some((x, y)) = v.cursor {
+                if let Some((x, y)) = server.input(ev).cursor {
                     println!("cursor {x} {y}");
                 }
             }
             Cmd::Sleep(d) => thread::sleep(d),
-            Cmd::Wait(w) => wait_until(&shared, w)?,
+            Cmd::Wait(w) => server.wait(w)?,
         }
     }
-
-    // Script done: end the session cleanly so queued events reach the client.
-    shared.lock().unwrap().disconnect();
-    wait_until(&shared, Wait::Idle)
-}
-
-fn wait_until(shared: &Shared, w: Wait) -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let ok = {
-            let s = shared.lock().unwrap();
-            match w {
-                Wait::Connected => s.out.is_some(),
-                Wait::Remote => s.remote,
-                Wait::Local => !s.remote,
-                Wait::Idle => !s.live,
-            }
-        };
-        if ok {
-            return Ok(());
-        }
-        if Instant::now() > deadline {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, format!("script: wait {w:?} timed out")));
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    // Script done: stopping ends the session cleanly, so queued events reach the client.
+    server.stop();
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -264,7 +374,6 @@ enum Wait {
     Connected,
     Remote,
     Local,
-    Idle,
 }
 
 enum Cmd {
@@ -444,20 +553,27 @@ fn key_event(scan: u32, flags: KBDLLHOOKSTRUCT_FLAGS) -> Input {
     Input::Key { scancode: scan as u16, extended: flags.contains(LLKHF_EXTENDED), down: !flags.contains(LLKHF_UP) }
 }
 
-static HOOKED: OnceLock<Shared> = OnceLock::new();
+/// The server the hook callbacks drive. Set while hooks are installed; cleared
+/// by the hook thread on its way out, so a new server can hook again.
+static HOOKED: Mutex<Option<Shared>> = Mutex::new(None);
+
+fn hooked() -> MutexGuard<'static, Option<Shared>> {
+    // A panic inside an extern "system" callback aborts, so never unwrap here.
+    HOOKED.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Run the state machine for one hook event. Returns true to swallow it.
-/// Only ever takes the mutex briefly: the net thread holds it for no I/O.
+/// Only ever takes the mutexes briefly: the net thread holds them for no I/O.
 fn hook_verdict(ev: Input) -> bool {
-    let Some(shared) = HOOKED.get() else { return false };
+    let Some(shared) = hooked().clone() else { return false };
     let v = shared.lock().unwrap_or_else(|e| e.into_inner()).on_input(ev);
     if let Some((x, y)) = v.cursor {
-        set_cursor(x, y);
+        set_cursor_pos(x, y);
     }
     !v.pass
 }
 
-fn set_cursor(x: i32, y: i32) {
+fn set_cursor_pos(x: i32, y: i32) {
     let _ = unsafe { SetCursorPos(x, y) };
 }
 
@@ -485,20 +601,69 @@ unsafe extern "system" fn key_proc(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// Real server: hooks on this thread with a message loop. Never returns on success.
-pub fn run_hooks(bind: &str, key: Key, edge: Edge, desk: Rect) -> io::Result<()> {
-    let shared = start(bind, key, edge, desk, set_cursor)?;
-    HOOKED.set(shared).map_err(|_| io::Error::other("hooks already running"))?;
-    unsafe {
-        let module = GetModuleHandleW(None).map_err(io::Error::other)?;
-        SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(module.into()), 0).map_err(io::Error::other)?;
-        SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_proc), Some(module.into()), 0).map_err(io::Error::other)?;
-        println!("hooks installed; panic hotkey is Ctrl+Alt+Shift+Esc");
-        // Hooks are called on this thread, from inside GetMessage.
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {}
+/// Install both hooks on a new thread that runs a message loop (hook callbacks
+/// run inside its GetMessage). Returns that thread's id, for WM_QUIT on stop.
+fn spawn_hooks(shared: Shared) -> io::Result<(u32, JoinHandle<()>)> {
+    {
+        let mut h = hooked();
+        if h.is_some() {
+            return Err(io::Error::other("hooks already running"));
+        }
+        *h = Some(shared);
     }
-    Ok(())
+    let (tx, rx) = mpsc::channel();
+    let thread = thread::spawn(move || {
+        unsafe {
+            let install = || -> windows::core::Result<(HHOOK, HHOOK)> {
+                let module = GetModuleHandleW(None)?;
+                let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), Some(module.into()), 0)?;
+                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(key_proc), Some(module.into()), 0) {
+                    Ok(keyboard) => Ok((mouse, keyboard)),
+                    Err(e) => {
+                        let _ = UnhookWindowsHookEx(mouse);
+                        Err(e)
+                    }
+                }
+            };
+            match install() {
+                Ok((mouse, keyboard)) => {
+                    let mut msg = MSG::default();
+                    // Create this thread's message queue before announcing the
+                    // thread id, so stop()'s WM_QUIT cannot arrive too early.
+                    let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+                    let _ = tx.send(Ok(GetCurrentThreadId()));
+                    // GetMessage returns 0 on WM_QUIT and -1 on error; stop on both.
+                    while GetMessageW(&mut msg, None, 0, 0).0 > 0 {}
+                    let _ = UnhookWindowsHookEx(mouse);
+                    let _ = UnhookWindowsHookEx(keyboard);
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(io::Error::other(e)));
+                }
+            }
+        }
+        *hooked() = None;
+    });
+    match rx.recv() {
+        Ok(Ok(thread_id)) => Ok((thread_id, thread)),
+        Ok(Err(e)) => {
+            let _ = thread.join();
+            Err(e)
+        }
+        Err(_) => {
+            let _ = thread.join();
+            Err(io::Error::other("hook thread exited before installing hooks"))
+        }
+    }
+}
+
+/// Real server for the CLI: hooks until the process ends.
+pub fn run_hooks(bind: &str, key: Key, edge: Edge, desk: Rect, on_status: OnStatus) -> io::Result<()> {
+    let _server = start(bind, key, edge, desk, true, on_status)?;
+    println!("hooks installed; panic hotkey is Ctrl+Alt+Shift+Esc");
+    loop {
+        thread::park();
+    }
 }
 
 #[cfg(test)]
