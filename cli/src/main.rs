@@ -1,12 +1,5 @@
-mod client;
-mod edge;
-mod keys;
-mod net;
-mod proto;
-mod server;
-mod win;
-
-use edge::{Edge, Rect};
+use input_share_core::edge::{Edge, Rect};
+use input_share_core::{client, net, server, win};
 use std::path::PathBuf;
 use std::process::ExitCode;
 

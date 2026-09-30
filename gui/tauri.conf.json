@@ -1,0 +1,11 @@
+{
+  "productName": "input-share",
+  "version": "0.1.0",
+  "identifier": "dev.inputshare.gui",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "title": "input-share", "width": 440, "height": 600 }]
+  },
+  "bundle": { "active": false, "icon": ["icons/icon.png", "icons/icon.ico"] }
+}
