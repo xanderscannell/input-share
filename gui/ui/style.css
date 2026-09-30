@@ -276,6 +276,7 @@ textarea { resize: none; }
 .row { display: flex; gap: 8px; align-items: center; }
 .row input { flex: 1; }
 .manual, .import { margin-top: 8px; }
+.actions.leave { margin-top: 20px; }
 .import textarea { margin-bottom: 8px; }
 .settings input[inputmode] { width: 9ch; margin-bottom: 16px; }
 

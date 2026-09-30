@@ -313,8 +313,15 @@ async function act(name, el, event) {
         break;
       }
       case "disconnect":
+        // Back home, like Stop sharing. (Returning to the host list left the
+        // client role on with no way out, and discovery was already stopped.)
         await invoke("disconnect");
-        Object.assign(ui, { conn: "idle", screen: "browsing", pointer: "other", peer: "", addr: "" });
+        Object.assign(ui, { role: null, conn: "idle", screen: "home", pointer: "this", peer: "", addr: "" });
+        break;
+      case "stop-browsing":
+        clearInterval(hostTimer);
+        await invoke("stop_browsing");
+        Object.assign(ui, { role: null, conn: "idle", screen: "home", pointer: "this", hosts: [] });
         break;
       case "key-new":
         if (ui.boot.fingerprint) ui.confirmReplace = true;
