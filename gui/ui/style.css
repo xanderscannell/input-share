@@ -289,6 +289,12 @@ textarea { resize: none; }
 .seg input:focus-visible + span { outline: 2px solid var(--focus); outline-offset: -4px; }
 
 .confirm { border-left: 3px solid var(--away); padding: 2px 0 2px 12px; margin-bottom: 16px; }
+
+/* Settings while a session runs: say why, and show the controls as off. */
+.locked { border-left: 3px solid var(--muted); padding: 2px 0 2px 12px; margin: 0 0 16px; }
+.settings :disabled, .settings :disabled + span { cursor: not-allowed; }
+/* Not the radios: they stay invisible (opacity 0); their labels dim instead. */
+.settings input:disabled:not([type="radio"]), .settings button:disabled, .seg input:disabled + span { opacity: 0.5; }
 .confirm p { margin: 0 0 10px; }
 
 @media (prefers-reduced-motion: reduce) {

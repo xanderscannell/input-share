@@ -2,7 +2,7 @@
 # Usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools/shots.ps1 [-States a,b] [-Themes light,dark]
 param(
   [string[]]$States = @("idle", "sharing-waiting", "sharing-here", "sharing-remote", "browsing",
-    "client-connected", "client-remote", "error", "keys", "keys-confirm", "settings"),
+    "client-connected", "client-remote", "error", "keys", "keys-confirm", "settings", "settings-locked"),
   [string[]]$Themes = @("light", "dark"),
   [string]$Exe = "target/debug/input-share-gui.exe",
   [string]$OutDir = "docs/gui"

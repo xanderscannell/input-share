@@ -189,6 +189,18 @@ function renderView() {
     const t = clone("t-settings");
     for (const r of t.querySelectorAll('input[name="edge"]')) r.checked = r.value === ui.boot.edge;
     $("#port", t).value = ui.boot.port;
+    // A running session keeps the settings it started with: lock until stopped.
+    if (ui.role) {
+      for (const el of t.querySelectorAll("input, button")) el.disabled = true;
+      const locked = slot(t, "locked");
+      locked.hidden = false;
+      locked.textContent =
+        ui.role === "server"
+          ? "Stop sharing to change these settings."
+          : ui.conn === "idle"
+            ? "Stop looking to change these settings."
+            : "Disconnect to change these settings.";
+    }
     view.append(t);
   }
 }
@@ -433,6 +445,7 @@ const CANNED = {
   keys: { screen: "keys" },
   "keys-confirm": { screen: "keys", confirmReplace: true },
   settings: { screen: "settings" },
+  "settings-locked": { role: "server", screen: "settings", conn: "waiting", addr: "192.168.1.10:24800" },
 };
 
 // ---- Start ----

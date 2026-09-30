@@ -290,6 +290,11 @@ impl Backend {
     }
 
     pub fn save_settings(&mut self, edge: &str, port: u16) -> Result<(), String> {
+        // A running session keeps the settings it started with, so changing
+        // them now would silently do nothing until the next start.
+        if self.is_running() || self.listener.is_some() {
+            return Err("Stop sharing or disconnect first, then change settings.".into());
+        }
         if !matches!(edge, "left" | "right") {
             return Err("Choose left or right.".into());
         }
@@ -388,6 +393,16 @@ mod tests {
         b.save_settings("left", 25000).unwrap();
         let boot = b.boot().unwrap();
         assert_eq!((boot.edge.as_str(), boot.port), ("left", 25000));
+
+        // Locked while anything is running: sharing, and looking for hosts.
+        b.start_sharing().unwrap();
+        assert!(b.save_settings("right", 24800).is_err());
+        b.stop_sharing();
+        b.start_browsing().unwrap();
+        assert!(b.save_settings("right", 24800).is_err());
+        b.stop_browsing();
+        b.save_settings("right", 24800).unwrap();
+        assert_eq!(b.boot().unwrap().edge, "right", "a refused save changes nothing, a later one works");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
