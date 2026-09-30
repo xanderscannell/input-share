@@ -2,7 +2,8 @@
 // injected input. Injection goes through a sink so `--dry-run` can print
 // instead of calling SendInput.
 
-use crate::edge::{ClientCursor, Edge, Rect, Step};
+use crate::edge::Edge;
+use crate::layout::{ClientCursor, Layout, Step};
 use crate::keys::Held;
 use crate::net::{self, Key};
 use crate::proto::{Button, Msg, VERSION};
@@ -30,6 +31,10 @@ pub type Sink<'a> = &'a mut dyn FnMut(Act);
 
 /// An owned sink the client thread can take with it.
 pub type BoxSink = Box<dyn FnMut(Act) + Send>;
+
+/// Reads this machine's monitor layout. Called at each crossing, so monitors
+/// plugged in between crossings are picked up.
+pub type LayoutFn = Box<dyn Fn() -> Layout + Send>;
 
 /// The `--dry-run` sink: one line per injected event.
 pub fn print_act(a: Act) {
@@ -62,18 +67,22 @@ fn send(input: INPUT) {
     }
 }
 
-fn inject(a: Act, screen: Rect) {
+fn inject(a: Act) {
     let mouse = |dx, dy, data: u32, flags| INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, mouseData: data, dwFlags: flags, time: 0, dwExtraInfo: 0 } },
     };
     let input = match a {
-        Act::MoveTo(x, y) => mouse(
-            to_absolute(x, screen.left, screen.w),
-            to_absolute(y, screen.top, screen.h),
-            0,
-            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-        ),
+        Act::MoveTo(x, y) => {
+            // Read per move (cheap) so a monitor change mid-session cannot skew moves.
+            let screen = crate::win::virtual_screen();
+            mouse(
+                to_absolute(x, screen.left, screen.w),
+                to_absolute(y, screen.top, screen.h),
+                0,
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+            )
+        }
         Act::Input(Msg::Key { scancode, extended, down }) => {
             let mut flags = KEYEVENTF_SCANCODE;
             if extended {
@@ -116,20 +125,19 @@ fn inject(a: Act, screen: Rect) {
 }
 
 unsafe extern "system" fn on_console_close(_ctrl: u32) -> BOOL {
-    // Screen size does not matter for key and button ups.
     let ups = INJECTED.lock().map(|mut h| h.release_all()).unwrap_or_default();
     for m in ups {
-        inject(Act::Input(m), Rect { left: 0, top: 0, w: 1, h: 1 });
+        inject(Act::Input(m));
     }
     false.into() // let the default handler end the process
 }
 
 /// The real sink: SendInput on this machine, with release-on-exit installed.
-pub fn send_input_sink(screen: Rect) -> impl FnMut(Act) {
+pub fn send_input_sink() -> impl FnMut(Act) + Send {
     if let Err(e) = unsafe { SetConsoleCtrlHandler(Some(on_console_close), true) } {
         eprintln!("warning: no Ctrl+C handler, keys may stick on exit: {e}");
     }
-    move |a| inject(a, screen)
+    inject
 }
 
 fn release_all(held: &mut Held, sink: Sink) {
@@ -151,7 +159,7 @@ pub struct ClientHandle {
 
 /// Connect to `addr` (default port if none given) and reconnect with backoff
 /// until stopped.
-pub fn start(addr: &str, key: Key, edge: Edge, screen: Rect, mut sink: BoxSink, on_status: OnStatus) -> ClientHandle {
+pub fn start(addr: &str, key: Key, edge: Edge, layout: LayoutFn, mut sink: BoxSink, on_status: OnStatus) -> ClientHandle {
     let addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:{}", net::DEFAULT_PORT) };
     let stop = Arc::new(AtomicBool::new(false));
     let sock = Arc::new(Mutex::new(None::<TcpStream>));
@@ -169,7 +177,7 @@ pub fn start(addr: &str, key: Key, edge: Edge, screen: Rect, mut sink: BoxSink, 
                         if stop.load(Ordering::SeqCst) {
                             break;
                         }
-                        let reason = match session(stream, &key, edge, screen, &mut *sink, &on_status) {
+                        let reason = match session(stream, &key, edge, &*layout, &mut *sink, &on_status) {
                             Ok(()) => "closed".to_string(),
                             Err(e) => e.to_string(),
                         };
@@ -221,11 +229,19 @@ impl Drop for ClientHandle {
     }
 }
 
-fn session(stream: TcpStream, key: &Key, edge: Edge, screen: Rect, sink: Sink, on_status: &OnStatus) -> io::Result<()> {
+fn session(
+    stream: TcpStream,
+    key: &Key,
+    edge: Edge,
+    layout: &dyn Fn() -> Layout,
+    sink: Sink,
+    on_status: &OnStatus,
+) -> io::Result<()> {
     let peer = stream.peer_addr()?;
     let (tx, mut rx) = net::handshake(stream, key, true)?;
     on_status(Status::Connected(peer.to_string()));
-    tx.send(&Msg::Hello { version: VERSION, w: screen.w, h: screen.h })?;
+    let desk = layout().bounds();
+    tx.send(&Msg::Hello { version: VERSION, w: desk.w, h: desk.h })?;
     tx.spawn_heartbeat(net::HEARTBEAT);
 
     let mut held = Held::default();
@@ -240,7 +256,7 @@ fn session(stream: TcpStream, key: &Key, edge: Edge, screen: Rect, sink: Sink, o
                 break Err(io::Error::other(format!("server protocol version {version}, want {VERSION}")));
             }
             Msg::Enter { y_frac } => {
-                let c = ClientCursor::enter(edge, screen, y_frac);
+                let c = ClientCursor::enter(edge, layout(), y_frac);
                 let (x, y) = c.pos();
                 println!("enter {x} {y}");
                 sink(Act::MoveTo(x, y));

@@ -1,6 +1,7 @@
 pub mod client;
 pub mod edge;
 pub mod keys;
+pub mod layout;
 pub mod net;
 pub mod proto;
 pub mod server;

@@ -3,6 +3,7 @@
 
 use input_share_core::client::{self, Act};
 use input_share_core::edge::{Edge, Rect};
+use input_share_core::layout::Layout;
 use input_share_core::net::keygen;
 use input_share_core::proto::Msg;
 use input_share_core::server::{self, Input};
@@ -18,6 +19,10 @@ const A_DOWN: Act = Act::Input(Msg::Key { scancode: 0x1E, extended: false, down:
 const A_UP: Act = Act::Input(Msg::Key { scancode: 0x1E, extended: false, down: false });
 
 type Log<T> = Arc<Mutex<Vec<T>>>;
+
+fn laptop() -> client::LayoutFn {
+    Box::new(|| Layout::single(LAPTOP))
+}
 
 fn recorder() -> (OnStatus, Log<Status>) {
     let log: Log<Status> = Default::default();
@@ -41,13 +46,13 @@ fn has<T>(log: &Log<T>, f: impl Fn(&T) -> bool) -> bool {
 fn connected_with_a_held() -> (server::ServerHandle, client::ClientHandle, Log<Status>, Log<Status>, Log<Act>) {
     let key = keygen();
     let (s_on, s_log) = recorder();
-    let server = server::start("127.0.0.1:0", key, Edge::Right, DESK, false, s_on).unwrap();
+    let server = server::start("127.0.0.1:0", key, Edge::Right, Layout::single(DESK), false, s_on).unwrap();
     let addr = server.local_addr().to_string();
 
     let acts: Log<Act> = Default::default();
     let a = acts.clone();
     let (c_on, c_log) = recorder();
-    let client = client::start(&addr, key, Edge::Right, LAPTOP, Box::new(move |act| a.lock().unwrap().push(act)), c_on);
+    let client = client::start(&addr, key, Edge::Right, laptop(), Box::new(move |act| a.lock().unwrap().push(act)), c_on);
 
     wait_for("server Connected", || has(&s_log, |s| matches!(s, Status::Connected(_))));
     server.input(Input::Move { x: 1919, y: 540 });
@@ -112,7 +117,7 @@ fn stopping_the_server_frees_the_port_and_releases_the_client() {
 #[test]
 fn stop_is_prompt_with_no_client() {
     let (s_on, s_log) = recorder();
-    let server = server::start("127.0.0.1:0", keygen(), Edge::Right, DESK, false, s_on).unwrap();
+    let server = server::start("127.0.0.1:0", keygen(), Edge::Right, Layout::single(DESK), false, s_on).unwrap();
     let addr = server.local_addr().to_string();
     assert_eq!(s_log.lock().unwrap().first(), Some(&Status::Listening(addr.clone())));
     let t = Instant::now();
@@ -121,7 +126,7 @@ fn stop_is_prompt_with_no_client() {
     assert_port_free(&addr);
 
     let (c_on, c_log) = recorder();
-    let client = client::start(&addr, keygen(), Edge::Right, LAPTOP, Box::new(|_| {}), c_on);
+    let client = client::start(&addr, keygen(), Edge::Right, laptop(), Box::new(|_| {}), c_on);
     wait_for("client Retrying", || has(&c_log, |s| matches!(s, Status::Retrying(_))));
     let t = Instant::now();
     client.stop();

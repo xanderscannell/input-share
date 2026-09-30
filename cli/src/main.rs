@@ -1,4 +1,5 @@
 use input_share_core::edge::{Edge, Rect};
+use input_share_core::layout::Layout;
 use input_share_core::status::{OnStatus, Status};
 use input_share_core::{client, net, server, win};
 use std::path::PathBuf;
@@ -71,22 +72,25 @@ fn run(args: &[String]) -> Result<(), String> {
         Some("server") => {
             let bind = flag(args, "--bind").unwrap_or(format!("0.0.0.0:{}", net::DEFAULT_PORT));
             if let Some(script) = flag(args, "--script") {
-                return server::run_script(&bind, load_key()?, edge, screen()?, script.as_ref(), print_status())
+                let layout = Layout::single(screen()?);
+                return server::run_script(&bind, load_key()?, edge, layout, script.as_ref(), print_status())
                     .map_err(|e| e.to_string());
             }
             let key = load_key()?;
             win::dpi_aware();
-            server::run_hooks(&bind, key, edge, win::virtual_screen(), print_status()).map_err(|e| e.to_string())
+            server::run_hooks(&bind, key, edge, win::layout(), print_status()).map_err(|e| e.to_string())
         }
         Some("client") => {
             let host = args.get(1).filter(|h| !h.starts_with("--")).ok_or("client needs HOST")?;
             let _client = if args.iter().any(|a| a == "--dry-run") {
-                client::start(host, load_key()?, edge, screen()?, Box::new(client::print_act), print_status())
+                let screen = screen()?;
+                let layout = Box::new(move || Layout::single(screen));
+                client::start(host, load_key()?, edge, layout, Box::new(client::print_act), print_status())
             } else {
                 let key = load_key()?;
                 win::dpi_aware();
-                let screen = win::virtual_screen();
-                client::start(host, key, edge, screen, Box::new(client::send_input_sink(screen)), print_status())
+                let sink = Box::new(client::send_input_sink());
+                client::start(host, key, edge, Box::new(win::layout), sink, print_status())
             };
             park_forever()
         }

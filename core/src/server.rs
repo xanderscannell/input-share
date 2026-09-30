@@ -5,7 +5,8 @@
 // wait on a channel. `on_input` does no I/O; outgoing messages go onto a
 // channel that a writer thread drains to the socket.
 
-use crate::edge::{self, Edge, Rect};
+use crate::edge::Edge;
+use crate::layout::Layout;
 use crate::keys::Held;
 use crate::net::{self, Key};
 use crate::proto::{Button, Msg, VERSION};
@@ -50,7 +51,8 @@ const SC_RSHIFT: u16 = 0x36;
 
 pub struct Server {
     edge: Edge,
-    desk: Rect,
+    /// Refreshed every 2 s in real mode, but only while Local (see `refresh_layout`).
+    layout: Layout,
     remote: bool,
     /// Some while a client session is up.
     out: Option<mpsc::Sender<Msg>>,
@@ -64,10 +66,10 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(edge: Edge, desk: Rect) -> Self {
+    pub fn new(edge: Edge, layout: Layout) -> Self {
         Server {
             edge,
-            desk,
+            layout,
             remote: false,
             out: None,
             local: Held::default(),
@@ -86,7 +88,16 @@ impl Server {
     }
 
     fn center(&self) -> (i32, i32) {
-        (self.desk.left + self.desk.w / 2, self.desk.top + self.desk.h / 2)
+        self.layout.park()
+    }
+
+    /// Take a newly read monitor layout. Ignored while Remote: the park point
+    /// is what mouse deltas are measured from, so moving it mid-session would
+    /// send one bogus jump. The next refresh after returning picks it up.
+    fn refresh_layout(&mut self, layout: Layout) {
+        if !self.remote {
+            self.layout = layout;
+        }
     }
 
     fn send(&self, m: Msg) {
@@ -112,8 +123,8 @@ impl Server {
 
         if !self.remote {
             match ev {
-                Input::Move { x, y } if self.out.is_some() && edge::server_hit(self.edge, self.desk, x) => {
-                    self.send(Msg::Enter { y_frac: self.desk.y_frac(y) });
+                Input::Move { x, y } if self.out.is_some() && self.layout.crossing_hit(self.edge, x, y) => {
+                    self.send(Msg::Enter { y_frac: self.layout.y_frac(y) });
                     self.set_remote(true);
                     return Verdict { pass: false, cursor: Some(self.center()) };
                 }
@@ -154,7 +165,7 @@ impl Server {
             return None;
         }
         self.set_remote(false);
-        Some(edge::server_return_point(self.edge, self.desk, y_frac))
+        Some(self.layout.return_point(self.edge, y_frac))
     }
 
     /// Force Local and end the session (its writer thread drains and closes).
@@ -177,7 +188,7 @@ fn session(
 ) -> io::Result<()> {
     let peer = stream.peer_addr()?;
     let (tx, mut rx) = net::handshake(stream, key, false)?;
-    let desk = shared.lock().unwrap().desk;
+    let desk = shared.lock().unwrap().layout.bounds();
     tx.send(&Msg::Hello { version: VERSION, w: desk.w, h: desk.h })?;
     tx.spawn_heartbeat(net::HEARTBEAT);
 
@@ -260,16 +271,18 @@ pub struct ServerHandle {
     accept: Option<JoinHandle<()>>,
     pump: Option<JoinHandle<()>>,
     hooks: Option<(u32, JoinHandle<()>)>,
+    refresh: Option<JoinHandle<()>>,
     on_status: OnStatus,
 }
 
 /// Bind and accept clients on a background thread. With `hooks`, also install
-/// the low-level hooks (real input); without, feed input through `input()`.
-pub fn start(bind: &str, key: Key, edge: Edge, desk: Rect, hooks: bool, on_status: OnStatus) -> io::Result<ServerHandle> {
+/// the low-level hooks (real input) and re-read the monitor layout every 2 s;
+/// without, feed input through `input()`.
+pub fn start(bind: &str, key: Key, edge: Edge, layout: Layout, hooks: bool, on_status: OnStatus) -> io::Result<ServerHandle> {
     let listener = TcpListener::bind(bind)?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
-    let shared: Shared = Arc::new(Mutex::new(Server::new(edge, desk)));
+    let shared: Shared = Arc::new(Mutex::new(Server::new(edge, layout)));
 
     let (status_tx, status_rx) = mpsc::channel();
     shared.lock().unwrap().status = Some(status_tx);
@@ -287,7 +300,23 @@ pub fn start(bind: &str, key: Key, edge: Edge, desk: Rect, hooks: bool, on_statu
         let (shared, stop, on_status) = (shared.clone(), stop.clone(), on_status.clone());
         thread::spawn(move || accept_loop(listener, shared, key, set_cursor, stop, on_status))
     };
-    Ok(ServerHandle { shared, addr, stop, accept: Some(accept), pump: Some(pump), hooks, on_status })
+    // Monitors plugged in or rearranged later. Never enumerated inside a hook.
+    let refresh = hooks.is_some().then(|| {
+        let (shared, stop) = (shared.clone(), stop.clone());
+        thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                for _ in 0..20 {
+                    if stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                let layout = crate::win::layout();
+                shared.lock().unwrap().refresh_layout(layout);
+            }
+        })
+    });
+    Ok(ServerHandle { shared, addr, stop, accept: Some(accept), pump: Some(pump), hooks, refresh, on_status })
 }
 
 impl ServerHandle {
@@ -314,6 +343,9 @@ impl ServerHandle {
             let _ = hook_thread.join();
         }
         let _ = accept.join(); // waits for the session to drain and close
+        if let Some(refresh) = self.refresh.take() {
+            let _ = refresh.join();
+        }
         self.shared.lock().unwrap().status = None; // ends the pump
         if let Some(pump) = self.pump.take() {
             let _ = pump.join();
@@ -350,9 +382,9 @@ impl Drop for ServerHandle {
 }
 
 /// Server with a scripted fake input source instead of hooks.
-pub fn run_script(bind: &str, key: Key, edge: Edge, desk: Rect, script: &Path, on_status: OnStatus) -> io::Result<()> {
+pub fn run_script(bind: &str, key: Key, edge: Edge, layout: Layout, script: &Path, on_status: OnStatus) -> io::Result<()> {
     let cmds = parse_script(&std::fs::read_to_string(script)?)?;
-    let server = start(bind, key, edge, desk, false, on_status)?;
+    let server = start(bind, key, edge, layout, false, on_status)?;
     for cmd in cmds {
         match cmd {
             Cmd::Input(ev) => {
@@ -437,11 +469,12 @@ fn parse_script(text: &str) -> io::Result<Vec<Cmd>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edge::Rect;
 
     const DESK: Rect = Rect { left: 0, top: 0, w: 1920, h: 1080 };
 
     fn connected() -> (Server, mpsc::Receiver<Msg>) {
-        let mut s = Server::new(Edge::Right, DESK);
+        let mut s = Server::new(Edge::Right, Layout::single(DESK));
         let (tx, rx) = mpsc::channel();
         s.out = Some(tx);
         (s, rx)
@@ -452,8 +485,22 @@ mod tests {
     }
 
     #[test]
+    fn layout_refresh_waits_until_local() {
+        let (mut s, rx) = connected();
+        let wide = Layout::single(Rect { left: 0, top: 0, w: 3840, h: 2160 });
+        s.on_input(Input::Move { x: 1919, y: 540 }); // Remote, parked at (960, 540)
+        s.refresh_layout(wide.clone());
+        s.on_input(Input::Move { x: 961, y: 540 }); // still measured from the old park point
+        s.on_leave(0.5);
+        s.refresh_layout(wide.clone());
+        assert_eq!(s.layout, wide);
+        let sent: Vec<Msg> = rx.try_iter().collect();
+        assert_eq!(sent[1], Msg::MouseMove { dx: 1, dy: 0 });
+    }
+
+    #[test]
     fn no_crossing_without_a_client() {
-        let mut s = Server::new(Edge::Right, DESK);
+        let mut s = Server::new(Edge::Right, Layout::single(DESK));
         assert_eq!(s.on_input(Input::Move { x: 1919, y: 5 }), PASS);
         assert!(!s.remote);
     }
@@ -658,8 +705,8 @@ fn spawn_hooks(shared: Shared) -> io::Result<(u32, JoinHandle<()>)> {
 }
 
 /// Real server for the CLI: hooks until the process ends.
-pub fn run_hooks(bind: &str, key: Key, edge: Edge, desk: Rect, on_status: OnStatus) -> io::Result<()> {
-    let _server = start(bind, key, edge, desk, true, on_status)?;
+pub fn run_hooks(bind: &str, key: Key, edge: Edge, layout: Layout, on_status: OnStatus) -> io::Result<()> {
+    let _server = start(bind, key, edge, layout, true, on_status)?;
     println!("hooks installed; panic hotkey is Ctrl+Alt+Shift+Esc");
     loop {
         thread::park();
