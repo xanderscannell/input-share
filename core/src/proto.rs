@@ -1,4 +1,4 @@
-// Wire messages: 1 tag byte + fixed little-endian fields. See DESIGN.md "Protocol".
+// Wire messages: 1 tag byte + fixed little-endian fields.
 
 pub const VERSION: u16 = 1;
 

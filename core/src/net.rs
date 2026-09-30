@@ -1,5 +1,5 @@
-// Framing, Noise NNpsk0 handshake, heartbeat and timeout. See DESIGN.md
-// "Protocol" and "Security". Frame: u16 length (LE) + Noise ciphertext.
+// Framing, Noise NNpsk0 handshake, heartbeat and timeout.
+// Frame: u16 length (LE) + Noise ciphertext.
 
 use crate::proto::Msg;
 use snow::{Builder, StatelessTransportState};

@@ -1,4 +1,4 @@
-// Server state machine and connection handling. See DESIGN.md "How it works".
+// Server state machine and connection handling.
 //
 // Input sources (hooks, or --script) call `Server::on_input` directly under a
 // mutex: a low-level hook must decide swallow/pass synchronously, so it cannot

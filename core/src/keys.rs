@@ -1,6 +1,6 @@
 // Held key and button tracker. The client uses it to release everything on
 // Leave/disconnect/exit; the server uses it to pass through key-ups for keys
-// held locally when control crossed to Remote. See DESIGN.md "Safety rails".
+// held locally when control crossed to Remote.
 
 use crate::proto::{Button, Msg};
 use std::collections::BTreeSet;
