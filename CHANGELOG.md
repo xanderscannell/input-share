@@ -17,6 +17,9 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
   window while they wait for the connection to close, which could make
   Windows end the app as hung
   ([BUG-004](docs/BUGS.md#bug-004-the-app-sometimes-crashes-when-quitting-or-disconnecting)).
+- Disconnecting or stopping can no longer get stuck forever when Windows
+  refuses to shut the connection's socket down, or when the other computer
+  never closes its end (BUG-004).
 
 ### Added
 

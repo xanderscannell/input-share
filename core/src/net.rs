@@ -6,6 +6,7 @@ use snow::{Builder, StatelessTransportState};
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -78,6 +79,9 @@ pub struct Sender {
     noise: Arc<StatelessTransportState>,
     // The nonce and the socket write sit under one lock so wire order matches nonce order.
     out: Arc<Mutex<(TcpStream, u64)>>,
+    /// Set by `shutdown`, so the heartbeat ends even when Windows refuses the
+    /// socket shutdown: its copy of the socket would keep the connection open.
+    closed: Arc<AtomicBool>,
 }
 
 impl Sender {
@@ -92,7 +96,7 @@ impl Sender {
     /// Send Heartbeat every `every` on a background thread until a send fails.
     pub fn spawn_heartbeat(&self, every: Duration) {
         let tx = self.clone();
-        thread::spawn(move || while tx.send(&Msg::Heartbeat).is_ok() {
+        thread::spawn(move || while !tx.closed.load(Ordering::SeqCst) && tx.send(&Msg::Heartbeat).is_ok() {
             thread::sleep(every);
         });
     }
@@ -101,6 +105,7 @@ impl Sender {
     /// peer's reads end; our Receiver keeps working until the peer closes too,
     /// which avoids the RST that closing with unread data would cause.
     pub fn shutdown(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         let _ = self.out.lock().unwrap().0.shutdown(std::net::Shutdown::Write);
     }
 }
@@ -150,7 +155,7 @@ pub fn handshake(stream: TcpStream, key: &Key, initiator: bool) -> io::Result<(S
         }
     }
     let noise = Arc::new(hs.into_stateless_transport_mode().map_err(noise_err)?);
-    let tx = Sender { noise: noise.clone(), out: Arc::new(Mutex::new((stream.try_clone()?, 0))) };
+    let tx = Sender { noise: noise.clone(), out: Arc::new(Mutex::new((stream.try_clone()?, 0))), closed: Default::default() };
     let rx = Receiver { noise, stream, nonce: 0, buf };
     Ok((tx, rx))
 }

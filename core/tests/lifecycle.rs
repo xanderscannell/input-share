@@ -4,12 +4,12 @@
 use input_share_core::client::{self, Act};
 use input_share_core::edge::{Edge, Rect};
 use input_share_core::layout::Layout;
-use input_share_core::net::keygen;
+use input_share_core::net::{self, keygen};
 use input_share_core::proto::Msg;
 use input_share_core::server::{self, Input};
 use input_share_core::status::{OnStatus, Status};
-use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -131,4 +131,30 @@ fn stop_is_prompt_with_no_client() {
     let t = Instant::now();
     client.stop();
     assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+}
+
+/// Run `f` on a thread; true if it returned within `limit`. A stop that hangs
+/// fails the test instead of hanging it (the stuck thread is left behind).
+fn finishes_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
+    let (done, finished) = mpsc::channel();
+    thread::spawn(move || {
+        f();
+        let _ = done.send(());
+    });
+    finished.recv_timeout(limit).is_ok()
+}
+
+/// BUG-004: a stop must not depend on the other side closing. Here the client
+/// stays alive (heartbeats) and never closes, even after the server's FIN.
+#[test]
+fn stopping_the_server_is_prompt_even_if_the_client_never_closes() {
+    let key = keygen();
+    let (s_on, s_log) = recorder();
+    let server = server::start("127.0.0.1:0", key, Edge::Right, Layout::single(DESK), false, s_on).unwrap();
+    let (tx, rx) = net::handshake(TcpStream::connect(server.local_addr()).unwrap(), &key, true).unwrap();
+    tx.spawn_heartbeat(Duration::from_millis(100));
+    wait_for("server Connected", || has(&s_log, |s| matches!(s, Status::Connected(_))));
+
+    assert!(finishes_within(Duration::from_secs(3), move || server.stop()), "server stop waited on the client");
+    drop((tx, rx));
 }

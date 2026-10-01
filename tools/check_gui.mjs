@@ -4,12 +4,20 @@
 // responding while a disconnect waits for the client to stop (BUG-004).
 // Usage: cargo build -p input-share-gui && node tools/check_gui.mjs
 import { spawn } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const port = "9333";
 const exe = fileURLToPath(new URL("../target/debug/input-share-gui.exe", import.meta.url));
 const gui = spawn(exe, ["--demo"], {
-  env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` },
+  env: {
+    ...process.env,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}`,
+    // Its own WebView2 folder: with a shared one, a GUI already running would
+    // host this window too, without the DevTools port.
+    WEBVIEW2_USER_DATA_FOLDER: join(tmpdir(), "input-share-check-webview"),
+  },
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

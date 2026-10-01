@@ -177,7 +177,7 @@ pub fn start(addr: &str, key: Key, edge: Edge, layout: LayoutFn, mut sink: BoxSi
                         if stop.load(Ordering::SeqCst) {
                             break;
                         }
-                        let reason = match session(stream, &key, edge, &*layout, &mut *sink, &on_status) {
+                        let reason = match session(stream, &key, edge, &*layout, &mut *sink, &on_status, &stop) {
                             Ok(()) => "closed".to_string(),
                             Err(e) => e.to_string(),
                         };
@@ -236,6 +236,7 @@ fn session(
     layout: &dyn Fn() -> Layout,
     sink: Sink,
     on_status: &OnStatus,
+    stop: &AtomicBool,
 ) -> io::Result<()> {
     let peer = stream.peer_addr()?;
     let (tx, mut rx) = net::handshake(stream, key, true)?;
@@ -251,6 +252,12 @@ fn session(
             Ok(m) => m,
             Err(e) => break Err(e),
         };
+        // stop() shuts the socket down to end this read, but Windows can refuse
+        // that on a live connection (WSAENOTCONN on the try_clone copy), and
+        // the server's heartbeat keeps the read alive. So check here too.
+        if stop.load(Ordering::SeqCst) {
+            break Ok(());
+        }
         match m {
             Msg::Hello { version, .. } if version != VERSION => {
                 break Err(io::Error::other(format!("server protocol version {version}, want {VERSION}")));
@@ -298,6 +305,32 @@ fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG-004: with stop set, a session ends at the next message even though
+    /// its socket is never shut down and the server keeps heartbeating.
+    #[test]
+    fn session_ends_on_stop_without_a_socket_shutdown() {
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        let key = net::keygen();
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (tx, rx) = net::handshake(l.accept().unwrap().0, &key, false).unwrap();
+            tx.spawn_heartbeat(Duration::from_millis(100));
+            (tx, rx) // kept alive by the caller: this side never closes
+        });
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            let on: OnStatus = Arc::new(|_| {});
+            let layout = || Layout::single(crate::edge::Rect { left: 0, top: 0, w: 100, h: 100 });
+            let stop = AtomicBool::new(true);
+            let r = session(TcpStream::connect(addr).unwrap(), &key, Edge::Right, &layout, &mut |_| {}, &on, &stop);
+            let _ = done.send(r.is_ok());
+        });
+        let _peer = server.join().unwrap();
+        assert_eq!(finished.recv_timeout(Duration::from_secs(3)), Ok(true), "session ignored stop");
+    }
 
     #[test]
     fn absolute_units_land_on_the_exact_pixel() {

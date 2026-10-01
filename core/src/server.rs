@@ -216,7 +216,13 @@ fn session(
     on_status(Status::Connected(peer.to_string()));
 
     let res = loop {
-        match rx.recv() {
+        let m = rx.recv();
+        // Ending the session must not depend on the client closing (BUG-004):
+        // a client that stays alive keeps this read going with heartbeats.
+        if stop.load(Ordering::SeqCst) {
+            break Ok(());
+        }
+        match m {
             Ok(Msg::Leave { y_frac }) => {
                 let p = shared.lock().unwrap().on_leave(y_frac);
                 if let Some((x, y)) = p {

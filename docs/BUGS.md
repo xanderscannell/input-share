@@ -191,7 +191,7 @@ confirmed working in the release build on the real computers.
 
 ## BUG-004: the app sometimes crashes when quitting or disconnecting
 
-- **Status:** Fixed (the window no longer hangs); why the laptop's stop took over 5 s is still unknown
+- **Status:** Fixed (two parts: the frozen window, then the stuck stop)
 - **Reported:** 2026-10-01
 - **Area:** gui, core
 
@@ -236,10 +236,35 @@ Sometimes the whole app crashes when quitting or disconnecting.
 - *Suspected*: the release build has no console, so a panic message is
   invisible; a real crash would leave no trace on screen.
 
+- *Observed* (reported, after the first fix): looping connect and
+  disconnect on the laptop got stuck again. The window kept answering, but
+  Disconnect, the tray's Stop and Quit all did nothing, and the app had to
+  be ended in Task Manager. All three wait for the same backend lock, so one
+  stop never finished: stuck, not just slow.
+- *Observed* (reproduced here): the demo GUI as client and the CLI server
+  (script mode, on loopback), connect and disconnect in a loop with random
+  waits. Stuck on round 139 of one run and round 265 of another. With
+  temporary debug output, the stuck round showed:
+  `stop: shutdown Err(Os { code: 10057, kind: NotConnected, ... })`.
+  The client's stop ends the session by shutting down a `try_clone` copy of
+  the socket, and Windows sometimes refuses that with `WSAENOTCONN` while
+  the connection is live. The error was ignored. The session loop never
+  checked the stop flag, and the server's heartbeat every second kept its
+  read from timing out, so the stop waited forever while holding the lock.
+  The server's log still showed the session as connected, which confirms
+  that no FIN was ever sent.
+- *Traced*: the server's stop had the same weakness. Its session only ended
+  when the client closed. *Observed*: a new test with a client that keeps
+  sending heartbeats and never closes hung the server's stop (test failed
+  after 3 s).
+
 ### Cause
 
-A hang on the main thread during a stop. The blocking joins below are the
-leading suspect, but they do not yet explain a wait longer than 5 s.
+Two layers. The window froze because every stop ran on the main thread.
+The stop itself could hang forever because ending a session depended on
+the socket shutdown succeeding (client) or the other side closing (server),
+and Windows can refuse the shutdown of a duplicated socket on a live
+connection.
 
 ### Decision
 
@@ -261,6 +286,13 @@ the slow stop itself is harmless once it no longer freezes the UI.
 - Not done: a "Disconnecting..." state in the window. A slow stop now leaves
   the button looking idle until it finishes. Add it if that is confusing.
 
+Second part: stop no longer depends on the socket shutdown. Both session
+loops check the stop flag after every message they read; heartbeats arrive
+every second, so a stop ends within about a second however the socket
+behaves. The shutdown stays as the fast path. The heartbeat thread also ends
+once its sender is shut down, even if the OS call fails, because its copy of
+the socket would otherwise keep the connection open by itself.
+
 ### Fix
 
 `gui/src/main.rs`. Guarded by `tools/check_gui.mjs`: it disconnects while a
@@ -270,6 +302,15 @@ three runs out of three, and the disconnect still completes. The tray's Quit
 and Stop and the close button were checked with `--demo-tray` (new `quit`
 sequence): Quit and close while idle exit with code 0, Stop and
 close-then-show keep running and Stop returns to the start screen.
+
+Second part: `core/src/client.rs`, `core/src/server.rs`, `core/src/net.rs`.
+Guarded by `session_ends_on_stop_without_a_socket_shutdown` (client unit
+test: fails without the new check, passes with it) and
+`stopping_the_server_is_prompt_even_if_the_client_never_closes`
+(`core/tests/lifecycle.rs`: failed before the fix, passes after). The
+reproduction loop then ran 500 rounds with no stuck stop. Windows refused the
+socket shutdown twice in that run, and both stops still finished, in 561 ms
+and 873 ms.
 
 ---
 
