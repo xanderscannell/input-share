@@ -130,7 +130,8 @@ the poll.
 `gui/ui/app.js`: `renderView()` keeps the browsing screen when it is already
 showing. Guarded by `tools/check_browsing.mjs` (run it after
 `cargo build -p input-share-gui`): it failed on the old code and passed on
-the fix in every run.
+the fix in every run. *Observed* (2026-10-01): confirmed working in the
+release build on the real computers.
 
 ---
 
@@ -183,7 +184,8 @@ on the other computer.
 ### Fix
 
 `gui/ui/app.js`: `go()` calls `pollHosts()` when it lands on browsing.
-Guarded by the same `tools/check_browsing.mjs`.
+Guarded by the same `tools/check_browsing.mjs`. *Observed* (2026-10-01):
+confirmed working in the release build on the real computers.
 
 ---
 
