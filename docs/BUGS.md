@@ -167,7 +167,7 @@ Pending.
 
 ## BUG-004: the app sometimes crashes when quitting or disconnecting
 
-- **Status:** Open
+- **Status:** Diagnosed (structural cause; what stalled the client is unknown)
 - **Reported:** 2026-10-01
 - **Area:** gui, core
 
@@ -180,6 +180,22 @@ Sometimes the whole app crashes when quitting or disconnecting.
 - *Observed*: no Application Error, Application Hang or Windows Error
   Reporting entry for `input-share` in this machine's Application event log
   for the last five days.
+- *Observed* (reported from the laptop, 2026-10-01): the crash left an
+  Application Hang (event 1002) for the app, not an Application Error
+  (1000). The process stopped answering window messages and Windows ended
+  it; nothing panicked or faulted.
+- *Observed* (reported): the laptop was the client and the hang started on
+  Disconnect in the window. While it hung, closing the window and Quit from
+  the tray did nothing either. That is expected once the main thread is
+  stuck: both arrive as messages to that same thread. So the trigger
+  matters less than the fact that any stop can block it.
+- *Traced*, ruled out: a deadlock between the client thread's status
+  `emit` and the waiting main thread. `tauri-runtime-wry` 2.12.0 only waits
+  for the main thread in `eval_script` when its `tracing` feature is on,
+  and `cargo tree` shows it is off here, so `emit` just posts and returns.
+- *Traced*: Windows only calls a window hung after about 5 s without
+  answering messages. The waits found below add up to 2 to 3 s, so either
+  they are longer in practice or something else blocks the main thread.
 - *Traced*: the hook callbacks never unwrap (a panic there would abort the
   process), and the workspace does not set `panic = "abort"`, so a panic on a
   worker thread should not take the process down.
@@ -198,13 +214,16 @@ Sometimes the whole app crashes when quitting or disconnecting.
 
 ### Cause
 
-Unknown. Leading suspect: the window freezing for a few seconds while a stop
-joins threads on the main thread. Needs a reproduction.
+A hang on the main thread during a stop. The blocking joins below are the
+leading suspect, but they do not yet explain a wait longer than 5 s.
 
 ### Decision
 
-Pending. Next step: reproduce with a debug build started from a terminal
-(it keeps a console, so a panic prints there) and note whether the window
-closes, freezes, or shows an error dialog.
+Pending. The structural cause is known: stops run on the main thread and
+wait there for worker threads, so any stall in a worker freezes the whole
+window. What made the client thread take longer than 5 s on the laptop is
+not known yet. A debug build run from a terminal on the laptop would show
+how far the client got before it stuck (it prints `release-all` when its
+session ends).
 
 ### Fix
