@@ -1,7 +1,8 @@
-// Drive the demo GUI through WebView2's DevTools port and check the host
-// list screen: a typed address survives the once-a-second refresh (BUG-002),
-// and the refresh keeps running after a visit to Settings (BUG-003).
-// Usage: cargo build -p input-share-gui && node tools/check_browsing.mjs
+// Drive the demo GUI through WebView2's DevTools port and check fixed bugs:
+// a typed address survives the host list refresh (BUG-002), the refresh keeps
+// running after a visit to Settings (BUG-003), and the window keeps
+// responding while a disconnect waits for the client to stop (BUG-004).
+// Usage: cargo build -p input-share-gui && node tools/check_gui.mjs
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -60,6 +61,23 @@ await evaluate(`(() => { ui.hosts = []; render(); })()`);
 await sleep(2500);
 const hosts = await evaluate(`document.querySelectorAll('.hosts li').length`);
 check("BUG-003 list keeps refreshing after visiting Settings", hosts === 2, `${hosts} hosts shown`);
+
+// BUG-004: disconnect while a connect is in flight. 192.0.2.1 is TEST-NET-1,
+// never routed, so the client sits in its 2 s connect timeout and the stop
+// has to wait for it. A main-thread call (tray_state) must still answer.
+await evaluate(`(() => { const i = document.getElementById('manual-addr'); i.value = '192.0.2.1:24800'; i.form.requestSubmit(); })()`);
+await sleep(300);
+await evaluate(`document.querySelector('[data-act=disconnect]').click()`);
+await sleep(100);
+const ms = await evaluate(`(async () => {
+  const t = performance.now();
+  await window.__TAURI__.core.invoke("tray_state", { state: "idle", tooltip: "input-share: not sharing" });
+  return Math.round(performance.now() - t);
+})()`);
+check("BUG-004 window answers during a slow disconnect", ms < 500, `main thread answered in ${ms} ms`);
+await sleep(2500);
+const after = await evaluate(`ui.screen`);
+check("BUG-004 the disconnect still finishes", after === "home", `screen ${after}`);
 
 ws.close();
 gui.kill();

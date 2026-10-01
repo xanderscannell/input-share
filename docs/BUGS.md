@@ -107,7 +107,7 @@ makes it nearly impossible to use.
   replaced by a new empty one: focus and text are both lost.
 - Matches the report exactly: the loss happens about once a second, whether
   or not any host was found.
-- *Observed*: reproduced in the demo GUI by `tools/check_browsing.mjs`. After
+- *Observed*: reproduced in the demo GUI by `tools/check_gui.mjs`. After
   typing into the box and waiting 3.5 s, the box was empty and had lost
   focus, on three runs out of three.
 
@@ -128,7 +128,7 @@ the poll.
 ### Fix
 
 `gui/ui/app.js`: `renderView()` keeps the browsing screen when it is already
-showing. Guarded by `tools/check_browsing.mjs` (run it after
+showing. Guarded by `tools/check_gui.mjs` (run it after
 `cargo build -p input-share-gui`): it failed on the old code and passed on
 the fix in every run. *Observed* (2026-10-01): confirmed working in the
 release build on the real computers.
@@ -154,7 +154,7 @@ Sometimes the list of computers that are sharing does not appear.
   restarts the poll. The list is then frozen at whatever it held when the
   user left, which is empty if no beacon had arrived yet. Only "Stop
   looking" and starting again recovers it.
-- *Observed*: reproduced in the demo GUI by `tools/check_browsing.mjs`. After
+- *Observed*: reproduced in the demo GUI by `tools/check_gui.mjs`. After
   1.5 s on Settings and back, an emptied list stayed empty, on three runs
   out of three.
 - *Observed* (this machine): Windows Firewall allows `input-share-gui.exe`
@@ -184,14 +184,14 @@ on the other computer.
 ### Fix
 
 `gui/ui/app.js`: `go()` calls `pollHosts()` when it lands on browsing.
-Guarded by the same `tools/check_browsing.mjs`. *Observed* (2026-10-01):
+Guarded by the same `tools/check_gui.mjs`. *Observed* (2026-10-01):
 confirmed working in the release build on the real computers.
 
 ---
 
 ## BUG-004: the app sometimes crashes when quitting or disconnecting
 
-- **Status:** Diagnosed (structural cause; what stalled the client is unknown)
+- **Status:** Fixed (the window no longer hangs); why the laptop's stop took over 5 s is still unknown
 - **Reported:** 2026-10-01
 - **Area:** gui, core
 
@@ -243,14 +243,33 @@ leading suspect, but they do not yet explain a wait longer than 5 s.
 
 ### Decision
 
-Pending. The structural cause is known: stops run on the main thread and
-wait there for worker threads, so any stall in a worker freezes the whole
-window. What made the client thread take longer than 5 s on the laptop is
-not known yet. A debug build run from a terminal on the laptop would show
-how far the client got before it stuck (it prints `release-all` when its
-session ends).
+Take every wait off the main thread rather than chase what made one stop
+slow. Whatever a worker thread waits on, the window must keep answering;
+the slow stop itself is harmless once it no longer freezes the UI.
+
+- Every command that takes the backend lock runs on Tauri's blocking pool
+  through one helper (`on_backend`). Not `#[tauri::command(async)]`: that
+  runs the body on a Tokio worker, and a join of several seconds would tie
+  one up. The lock still serializes commands, so a Connect right after a
+  Disconnect waits for the old client to finish, as before.
+- The main thread never waits for the lock. The close button uses
+  `try_lock` and treats a busy backend as running (hide to the tray). The
+  tray's Stop and Quit run on their own thread; Quit exits only after
+  everything is released, so a hidden cursor is always restored.
+- Left as is: the shutdown in `RunEvent::Exit` (after Quit it has nothing
+  left to do; on logoff it is the last chance to release everything).
+- Not done: a "Disconnecting..." state in the window. A slow stop now leaves
+  the button looking idle until it finishes. Add it if that is confusing.
 
 ### Fix
+
+`gui/src/main.rs`. Guarded by `tools/check_gui.mjs`: it disconnects while a
+connect to an unrouted address is in flight and times a call that needs the
+main thread. Old code: 1749 ms, blocked behind the stop. Fixed: 3 ms, on
+three runs out of three, and the disconnect still completes. The tray's Quit
+and Stop and the close button were checked with `--demo-tray` (new `quit`
+sequence): Quit and close while idle exit with code 0, Stop and
+close-then-show keep running and Stop returns to the start screen.
 
 ---
 

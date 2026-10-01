@@ -5,7 +5,7 @@ mod backend;
 
 use backend::{Backend, Boot, HostView, StatusEvent};
 use input_share_core::config::Home;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -17,64 +17,71 @@ fn lock<'a>(app: &'a State<'_, App>) -> std::sync::MutexGuard<'a, Backend> {
     app.0.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-#[tauri::command]
-fn boot(app: State<App>) -> Result<Boot, String> {
-    lock(&app).boot()
+/// Run `f` on the backend from the blocking pool, never the main thread. A
+/// stop waits for network threads, which can take seconds; on the main thread
+/// that froze the window until Windows closed it as hung (BUG-004).
+async fn on_backend<T: Send + 'static>(app: AppHandle, f: impl FnOnce(&mut Backend) -> T + Send + 'static) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || f(&mut lock(&app.state::<App>()))).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn start_sharing(app: State<App>) -> Result<String, String> {
-    lock(&app).start_sharing()
+async fn boot(app: AppHandle) -> Result<Boot, String> {
+    on_backend(app, |b| b.boot()).await?
 }
 
 #[tauri::command]
-fn stop_sharing(app: State<App>) {
-    lock(&app).stop_sharing()
+async fn start_sharing(app: AppHandle) -> Result<String, String> {
+    on_backend(app, |b| b.start_sharing()).await?
 }
 
 #[tauri::command]
-fn start_browsing(app: State<App>) -> Result<(), String> {
-    lock(&app).start_browsing()
+async fn stop_sharing(app: AppHandle) -> Result<(), String> {
+    on_backend(app, |b| b.stop_sharing()).await
 }
 
 #[tauri::command]
-fn hosts(app: State<App>) -> Result<Vec<HostView>, String> {
-    lock(&app).hosts()
+async fn start_browsing(app: AppHandle) -> Result<(), String> {
+    on_backend(app, |b| b.start_browsing()).await?
 }
 
 #[tauri::command]
-fn stop_browsing(app: State<App>) {
-    lock(&app).stop_browsing()
+async fn hosts(app: AppHandle) -> Result<Vec<HostView>, String> {
+    on_backend(app, |b| b.hosts()).await?
 }
 
 #[tauri::command]
-fn connect(app: State<App>, addr: String) -> Result<(), String> {
-    lock(&app).connect(&addr)
+async fn stop_browsing(app: AppHandle) -> Result<(), String> {
+    on_backend(app, |b| b.stop_browsing()).await
 }
 
 #[tauri::command]
-fn disconnect(app: State<App>) {
-    lock(&app).disconnect()
+async fn connect(app: AppHandle, addr: String) -> Result<(), String> {
+    on_backend(app, move |b| b.connect(&addr)).await?
 }
 
 #[tauri::command]
-fn key_generate(app: State<App>, replace: bool) -> Result<String, String> {
-    lock(&app).key_generate(replace)
+async fn disconnect(app: AppHandle) -> Result<(), String> {
+    on_backend(app, |b| b.disconnect()).await
 }
 
 #[tauri::command]
-fn key_import(app: State<App>, text: String, replace: bool) -> Result<String, String> {
-    lock(&app).key_import(&text, replace)
+async fn key_generate(app: AppHandle, replace: bool) -> Result<String, String> {
+    on_backend(app, move |b| b.key_generate(replace)).await?
 }
 
 #[tauri::command]
-fn key_reveal(app: State<App>) -> Result<String, String> {
-    lock(&app).key_reveal()
+async fn key_import(app: AppHandle, text: String, replace: bool) -> Result<String, String> {
+    on_backend(app, move |b| b.key_import(&text, replace)).await?
 }
 
 #[tauri::command]
-fn save_settings(app: State<App>, edge: String, port: u16) -> Result<(), String> {
-    lock(&app).save_settings(&edge, port)
+async fn key_reveal(app: AppHandle) -> Result<String, String> {
+    on_backend(app, |b| b.key_reveal()).await?
+}
+
+#[tauri::command]
+async fn save_settings(app: AppHandle, edge: String, port: u16) -> Result<(), String> {
+    on_backend(app, move |b| b.save_settings(&edge, port)).await?
 }
 
 /// The web UI knows the whole state (role, where the pointer is, and which
@@ -108,13 +115,20 @@ fn show_window(app: &AppHandle) {
 fn tray_action(app: &AppHandle, id: &str) {
     match id {
         "show" => show_window(app),
+        // Off the main thread, like the commands: stopping can take seconds.
         "stop" => {
-            lock(&app.state::<App>()).shutdown();
-            let _ = app.emit("tray-stop", ());
+            let app = app.clone();
+            std::thread::spawn(move || {
+                lock(&app.state::<App>()).shutdown();
+                let _ = app.emit("tray-stop", ());
+            });
         }
         "quit" => {
-            lock(&app.state::<App>()).shutdown(); // release everything before exiting
-            app.exit(0);
+            let app = app.clone();
+            std::thread::spawn(move || {
+                lock(&app.state::<App>()).shutdown(); // release everything (cursor, keys) before exiting
+                app.exit(0);
+            });
         }
         _ => {}
     }
@@ -140,7 +154,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// `--demo-tray stop|close-show|close-idle`: drive the tray and window the
+/// `--demo-tray stop|quit|close-show|close-idle`: drive the tray and window the
 /// way a user would, so screenshots can check the result. Demo only.
 fn demo_tray(app: AppHandle, sequence: String) {
     let pause = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
@@ -156,6 +170,7 @@ fn demo_tray(app: AppHandle, sequence: String) {
             pause(1900);
             tray_action(&app, "stop");
         }
+        "quit" => tray_action(&app, "quit"),
         "close-show" | "close-idle" => {
             if let Some(w) = window() {
                 let _ = w.close(); // goes through CloseRequested, like the title bar's X
@@ -225,9 +240,14 @@ fn main() {
         ])
         .on_window_event(|window, event| {
             // While sharing or connected, the close button hides to the tray;
-            // while idle it quits.
+            // while idle it quits. Busy (a start or stop in progress) counts as
+            // running: waiting for the lock here would freeze the window.
             if let WindowEvent::CloseRequested { api, .. } = event
-                && lock(&window.state::<App>()).is_running()
+                && match window.state::<App>().0.try_lock() {
+                    Ok(b) => b.is_running(),
+                    Err(TryLockError::Poisoned(e)) => e.into_inner().is_running(),
+                    Err(TryLockError::WouldBlock) => true,
+                }
             {
                 api.prevent_close();
                 let _ = window.hide();

@@ -13,10 +13,15 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
   every second ([BUG-002](docs/BUGS.md#bug-002-the-manual-address-box-loses-focus-and-clears-itself)).
 - The host list keeps refreshing after a visit to Key or Settings
   ([BUG-003](docs/BUGS.md#bug-003-the-host-list-sometimes-never-shows-any-computers)).
+- Disconnect, Stop sharing and the tray's Stop and Quit no longer freeze the
+  window while they wait for the connection to close, which could make
+  Windows end the app as hung
+  ([BUG-004](docs/BUGS.md#bug-004-the-app-sometimes-crashes-when-quitting-or-disconnecting)).
 
 ### Added
 
-- `tools/check_browsing.mjs`: drives the demo GUI and checks both fixes above.
+- `tools/check_gui.mjs`: drives the demo GUI and checks the fixes above.
+- `--demo-tray quit`: drives the tray's Quit in demo mode.
 
 ## [0.1.0] - not yet tagged
 
