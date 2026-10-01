@@ -87,7 +87,7 @@ Pending.
 
 ## BUG-002: the manual address box loses focus and clears itself
 
-- **Status:** Diagnosed
+- **Status:** Fixed
 - **Reported:** 2026-10-01
 - **Area:** gui
 
@@ -107,6 +107,9 @@ makes it nearly impossible to use.
   replaced by a new empty one: focus and text are both lost.
 - Matches the report exactly: the loss happens about once a second, whether
   or not any host was found.
+- *Observed*: reproduced in the demo GUI by `tools/check_browsing.mjs`. After
+  typing into the box and waiting 3.5 s, the box was empty and had lost
+  focus, on three runs out of three.
 
 ### Cause
 
@@ -115,15 +118,25 @@ including the address input, instead of updating only the list.
 
 ### Decision
 
-Pending.
+Rebuild the browsing screen only when arriving on it. While it stays open,
+update the host list in place, and rebuild the host buttons only when the
+list actually changed, so a focused or hovered button is not replaced
+either. A smaller change than splitting the list into its own render
+function, and it covers every caller of `render()` on that screen, not only
+the poll.
 
 ### Fix
+
+`gui/ui/app.js`: `renderView()` keeps the browsing screen when it is already
+showing. Guarded by `tools/check_browsing.mjs` (run it after
+`cargo build -p input-share-gui`): it failed on the old code and passed on
+the fix in every run.
 
 ---
 
 ## BUG-003: the host list sometimes never shows any computers
 
-- **Status:** Diagnosed (one cause traced; others still possible)
+- **Status:** Fixed (GUI cause); network causes not checked on the other computer
 - **Reported:** 2026-10-01
 - **Area:** gui, possibly network
 
@@ -140,6 +153,9 @@ Sometimes the list of computers that are sharing does not appear.
   restarts the poll. The list is then frozen at whatever it held when the
   user left, which is empty if no beacon had arrived yet. Only "Stop
   looking" and starting again recovers it.
+- *Observed*: reproduced in the demo GUI by `tools/check_browsing.mjs`. After
+  1.5 s on Settings and back, an emptied list stayed empty, on three runs
+  out of three.
 - *Observed* (this machine): Windows Firewall allows `input-share-gui.exe`
   inbound on Private networks only, and both Ethernet and Tailscale are
   Private here. Not checked on the other computer. Firewall rules are tied to
@@ -159,9 +175,15 @@ Network causes on the other computer are not ruled out.
 
 ### Decision
 
-Pending.
+Restart the poll whenever `go()` lands on the browsing screen. The poll
+already stops itself when the screen changes, so starting it on the way back
+is the one missing half. The network leads stay open until they are checked
+on the other computer.
 
 ### Fix
+
+`gui/ui/app.js`: `go()` calls `pollHosts()` when it lands on browsing.
+Guarded by the same `tools/check_browsing.mjs`.
 
 ---
 
@@ -225,5 +247,44 @@ window. What made the client thread take longer than 5 s on the laptop is
 not known yet. A debug build run from a terminal on the laptop would show
 how far the client got before it stuck (it prints `release-all` when its
 session ends).
+
+### Fix
+
+---
+
+## BUG-005: a mistyped address leaves the client stuck on "Connecting"
+
+- **Status:** Diagnosed
+- **Reported:** 2026-10-01 (found while fixing BUG-002)
+- **Area:** gui
+
+### Symptom
+
+Typing something that is not an IP address (a hostname, a typo) and
+pressing Connect shows the error, but the screen also changes to
+"Connecting to ...". Nothing is connecting, and the host search has
+already stopped.
+
+### Investigation
+
+- *Traced*: `connectTo` stops browsing and switches to the client screen
+  with `conn: "connecting"` before calling `connect`
+  (`gui/ui/app.js`, `connectTo`). The backend rejects anything that does not
+  parse as `IP:port` (`gui/src/backend.rs:251`), and nothing puts the screen
+  back when that call fails.
+- *Observed*: in the demo GUI, submitting `not-an-ip` left `screen:
+  "client"`, `conn: "connecting"`, the status "Connecting to not-an-ip…",
+  and the alert "not-an-ip:24800 is not an address like
+  192.168.1.20:24800."
+- Disconnect still gets out of it, back to the start screen.
+
+### Cause
+
+The client screen is shown optimistically and never undone when `connect`
+fails.
+
+### Decision
+
+Pending.
 
 ### Fix

@@ -7,7 +7,16 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- The address box on the host list no longer loses focus and clears itself
+  every second ([BUG-002](docs/BUGS.md#bug-002-the-manual-address-box-loses-focus-and-clears-itself)).
+- The host list keeps refreshing after a visit to Key or Settings
+  ([BUG-003](docs/BUGS.md#bug-003-the-host-list-sometimes-never-shows-any-computers)).
+
+### Added
+
+- `tools/check_browsing.mjs`: drives the demo GUI and checks both fixes above.
 
 ## [0.1.0] - not yet tagged
 
@@ -34,4 +43,4 @@ The first working version: everything up to commit `de6da48`.
 
 ### Known issues
 
-- BUG-001 to BUG-004 in [docs/BUGS.md](docs/BUGS.md).
+- BUG-001 to BUG-005 in [docs/BUGS.md](docs/BUGS.md).

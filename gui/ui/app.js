@@ -124,7 +124,11 @@ function statusText() {
 
 function renderView() {
   const view = $("#view");
-  view.textContent = "";
+  // The host list refreshes every second; rebuilding the browsing screen each
+  // time would replace the address box someone is typing in. Keep it.
+  const keep = ui.screen === "browsing" && view.dataset.screen === "browsing";
+  if (!keep) view.textContent = "";
+  view.dataset.screen = ui.screen;
   const nav = { keys: "keys", settings: "settings" };
   for (const b of document.querySelectorAll(".bar-nav button")) {
     b.toggleAttribute("aria-current", nav[ui.screen] === b.dataset.go);
@@ -143,27 +147,33 @@ function renderView() {
   }
 
   if (ui.screen === "browsing") {
-    const t = clone("t-browsing");
+    const t = keep ? view : clone("t-browsing");
     const list = slot(t, "hosts");
-    for (const h of ui.hosts) {
-      const li = clone("t-host");
-      const btn = $("button", li);
-      slot(li, "name").textContent = h.name || h.addr;
-      slot(li, "addr").textContent = h.addr;
-      const key = slot(li, "key");
-      key.classList.toggle("paired", h.paired);
-      key.append(icon(h.paired ? "check" : "cross"), document.createTextNode(h.paired ? "Same key" : "Different key"));
-      btn.dataset.addr = h.addr;
-      btn.dataset.name = h.name || h.addr;
-      if (!h.paired) {
-        btn.setAttribute("aria-disabled", "true");
-        btn.title = "This computer has a different key. Import its key first.";
+    // Unchanged hosts: leave the buttons alone, so focus and hover stay put.
+    const hostsKey = JSON.stringify(ui.hosts);
+    if (list.dataset.hosts !== hostsKey) {
+      list.textContent = "";
+      for (const h of ui.hosts) {
+        const li = clone("t-host");
+        const btn = $("button", li);
+        slot(li, "name").textContent = h.name || h.addr;
+        slot(li, "addr").textContent = h.addr;
+        const key = slot(li, "key");
+        key.classList.toggle("paired", h.paired);
+        key.append(icon(h.paired ? "check" : "cross"), document.createTextNode(h.paired ? "Same key" : "Different key"));
+        btn.dataset.addr = h.addr;
+        btn.dataset.name = h.name || h.addr;
+        if (!h.paired) {
+          btn.setAttribute("aria-disabled", "true");
+          btn.title = "This computer has a different key. Import its key first.";
+        }
+        list.append(li);
       }
-      list.append(li);
+      list.dataset.hosts = hostsKey;
     }
     slot(t, "empty").hidden = ui.hosts.length > 0;
     list.hidden = ui.hosts.length === 0;
-    view.append(t);
+    if (!keep) view.append(t);
   }
 
   if (ui.screen === "client") {
@@ -404,6 +414,8 @@ function go(screen) {
   if (screen === "home" && ui.role === "client") screen = ui.conn === "idle" ? "browsing" : "client";
   ui.screen = screen;
   render();
+  // The poll stops itself while another screen is open; start it again.
+  if (screen === "browsing") pollHosts();
 }
 
 document.addEventListener("click", (e) => {
