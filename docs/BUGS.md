@@ -311,6 +311,8 @@ test: fails without the new check, passes with it) and
 reproduction loop then ran 500 rounds with no stuck stop. Windows refused the
 socket shutdown twice in that run, and both stops still finished, in 561 ms
 and 873 ms.
+*Observed* (2026-10-01): confirmed on the laptop as client, repeated
+connect and disconnect with no more hangs.
 
 ---
 
