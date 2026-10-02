@@ -161,7 +161,7 @@ release build on the real computers.
 
 ## BUG-003: the host list sometimes never shows any computers
 
-- **Status:** Fixed (GUI cause); network cause found (Public network profile), documented in the README
+- **Status:** Fixed (GUI cause); network cause (Public network profile) confirmed and documented in the README
 - **Reported:** 2026-10-01
 - **Area:** gui, possibly network
 
@@ -199,8 +199,9 @@ Sometimes the list of computers that are sharing does not appear.
   **Public**.
 - *Traced*: the README tells people to allow the firewall prompt on Private
   networks only, so on a Public network Windows blocks the incoming beacons
-  and connections, which matches every symptom. Not yet checked: that
-  laptop's firewall rule itself, and that switching to Private fixes it.
+  and connections, which matches every symptom.
+- *Observed* (reported, 2026-10-01): switching that laptop's network to
+  Private fixed it.
 
 ### Cause
 
