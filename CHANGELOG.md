@@ -7,39 +7,45 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.1] - 2026-10-01
+
 ### Fixed
 
+- Launching the app while it is already running (for example hidden in the
+  tray, still sharing) brings the running copy forward instead of opening a
+  second, idle window ([BUG-001](docs/BUGS.md#bug-001-a-client-connects-even-though-the-host-has-not-started-sharing)).
 - The address box on the host list no longer loses focus and clears itself
   every second ([BUG-002](docs/BUGS.md#bug-002-the-manual-address-box-loses-focus-and-clears-itself)).
 - The host list keeps refreshing after a visit to Key or Settings
   ([BUG-003](docs/BUGS.md#bug-003-the-host-list-sometimes-never-shows-any-computers)).
 - Disconnect, Stop sharing and the tray's Stop and Quit no longer freeze the
-  window while they wait for the connection to close, which could make
-  Windows end the app as hung
+  window or get stuck forever, which could make Windows end the app as hung
+  or leave it needing Task Manager. A stop now finishes within about a
+  second even when Windows refuses to shut the connection's socket down or
+  the other computer never closes its end
   ([BUG-004](docs/BUGS.md#bug-004-the-app-sometimes-crashes-when-quitting-or-disconnecting)).
-- Disconnecting or stopping can no longer get stuck forever when Windows
-  refuses to shut the connection's socket down, or when the other computer
-  never closes its end (BUG-004).
-
-- Launching the app while it is already running (for example hidden in the
-  tray, still sharing) now brings the running copy forward instead of
-  opening a second, idle window
-  ([BUG-001](docs/BUGS.md#bug-001-a-client-connects-even-though-the-host-has-not-started-sharing)).
-
-- A mistyped address no longer leaves the screen on "Connecting..."; it stays
-  on the host list with the error and the typed text
+- A mistyped address no longer leaves the screen on "Connecting..."; it
+  stays on the host list with the error and the typed text
   ([BUG-005](docs/BUGS.md#bug-005-a-mistyped-address-leaves-the-client-stuck-on-connecting)).
-- Demo mode: connecting to a host from the list works (its fake host used to
-  shut down as the list closed).
+- Demo mode: connecting to a host from the list works (its fake host used
+  to shut down as the list closed).
 
 ### Added
 
 - `tools/check_gui.mjs`: drives the demo GUI and checks the fixes above.
 - `--demo-tray quit`: drives the tray's Quit in demo mode.
 
-## [0.1.0] - not yet tagged
+### Known issues
 
-The first working version: everything up to commit `de6da48`.
+- BUG-003 may also have network causes on the other computer (a Public
+  network profile, or broadcasts leaving through a VPN adapter), not yet
+  checked. See [docs/BUGS.md](docs/BUGS.md).
+
+## [0.1.0] - 2026-09-29
+
+The first release.
 
 ### Added
 
@@ -60,7 +66,6 @@ The first working version: everything up to commit `de6da48`.
 - Settings locked while sharing, looking for hosts or connected.
 - App icon, README and MIT license.
 
-### Known issues
-
-- Open leads in [docs/BUGS.md](docs/BUGS.md): BUG-003 may also have
-  network causes on the other computer, not yet checked.
+[Unreleased]: https://github.com/xanderscannell/input-share/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/xanderscannell/input-share/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/xanderscannell/input-share/releases/tag/v0.1.0

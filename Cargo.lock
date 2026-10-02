@@ -1642,14 +1642,14 @@ dependencies = [
 
 [[package]]
 name = "input-share"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "input-share-core",
 ]
 
 [[package]]
 name = "input-share-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake2",
  "snow",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "input-share-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "input-share-core",
  "serde",
