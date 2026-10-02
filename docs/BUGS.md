@@ -161,7 +161,7 @@ release build on the real computers.
 
 ## BUG-003: the host list sometimes never shows any computers
 
-- **Status:** Fixed (GUI cause); network causes not checked on the other computer
+- **Status:** Fixed (GUI cause); network cause found (Public network profile), documented in the README
 - **Reported:** 2026-10-01
 - **Area:** gui, possibly network
 
@@ -192,18 +192,34 @@ Sometimes the list of computers that are sharing does not appear.
   machine's beacons should reach the LAN; not checked on the other computer.
 - *Suspected*: if the other computer's broadcast leaves on the wrong adapter
   (VPN, virtual switch), its beacons never reach this LAN.
+- *Observed* (reported, 2026-10-01, a third laptop): as client it never
+  listed any host; as host the other computer kept retrying and could not
+  connect; as client with a typed address it connected and worked. Only
+  traffic arriving at that laptop failed. Its network profile was
+  **Public**.
+- *Traced*: the README tells people to allow the firewall prompt on Private
+  networks only, so on a Public network Windows blocks the incoming beacons
+  and connections, which matches every symptom. Not yet checked: that
+  laptop's firewall rule itself, and that switching to Private fixes it.
 
 ### Cause
 
-At least one: the poll is never restarted after visiting Key or Settings.
-Network causes on the other computer are not ruled out.
+Two separate causes. In the app: the poll was never restarted after
+visiting Key or Settings. On the network: a computer whose network is
+marked Public blocks everything coming in, given the app's Private-only
+firewall rule.
 
 ### Decision
 
 Restart the poll whenever `go()` lands on the browsing screen. The poll
 already stops itself when the screen changes, so starting it on the way back
-is the one missing half. The network leads stay open until they are checked
-on the other computer.
+is the one missing half.
+
+For the Public network: no code change. Allowing the app on Public networks
+as well would accept connections on cafe and airport networks too; the
+right fix is marking the home network Private. The README now says so in the
+setup steps and under Network and security, with the symptoms and how to
+check. The VPN adapter lead stays a suspicion: it has not been seen.
 
 ### Fix
 

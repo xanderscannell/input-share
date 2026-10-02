@@ -36,12 +36,8 @@ Nothing yet.
 
 - `tools/check_gui.mjs`: drives the demo GUI and checks the fixes above.
 - `--demo-tray quit`: drives the tray's Quit in demo mode.
-
-### Known issues
-
-- BUG-003 may also have network causes on the other computer (a Public
-  network profile, or broadcasts leaving through a VPN adapter), not yet
-  checked. See [docs/BUGS.md](docs/BUGS.md).
+- README: both computers' networks must be set to Private. On a Public
+  network a computer cannot see hosts or accept connections (BUG-003).
 
 ## [0.1.0] - 2026-09-29
 

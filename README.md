@@ -65,7 +65,8 @@ Copy the same program to the other computer. Nothing needs installing.
    the sharing computer's point of view. Use the same answer on both.
 4. **Share:** on the computer with the keyboard and mouse, choose **Share this
    keyboard and mouse**. The first time, Windows Firewall asks for access:
-   allow it on **Private** networks only.
+   allow it on **Private** networks only. Both computers' networks must be
+   set to Private too (see [Network and security](#network-and-security)).
 5. **Connect:** on the other computer, choose **Use another computer's
    keyboard and mouse** and pick the sharing computer from the list (or type
    the address it shows).
@@ -126,7 +127,13 @@ For trying things out without touching the real mouse and keyboard:
   fingerprint of the key. The fingerprint does not reveal the key. Beacons are
   only a convenience for finding the address; they are never trusted for
   anything else.
-- Allow the firewall prompts on **Private** networks only.
+- Allow the firewall prompts on **Private** networks only, and set your home
+  network to **Private** on both computers: Settings, Network & internet,
+  Wi-Fi (or Ethernet), the network's properties, **Network profile type**.
+  On a network marked Public, Windows blocks everything coming in, so that
+  computer cannot see other computers that are sharing, and nothing can
+  connect to it when it shares. It can still connect out to a typed address.
+  To check: `Get-NetConnectionProfile` in PowerShell.
 
 ## Known limits
 
