@@ -1,7 +1,8 @@
 // Drive the demo GUI through WebView2's DevTools port and check fixed bugs:
 // a typed address survives the host list refresh (BUG-002), the refresh keeps
 // running after a visit to Settings (BUG-003), and the window keeps
-// responding while a disconnect waits for the client to stop (BUG-004).
+// responding while a disconnect waits for the client to stop (BUG-004), and a
+// mistyped address keeps the host list instead of "Connecting" (BUG-005).
 // Usage: cargo build -p input-share-gui && node tools/check_gui.mjs
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -70,6 +71,19 @@ await sleep(2500);
 const hosts = await evaluate(`document.querySelectorAll('.hosts li').length`);
 check("BUG-003 list keeps refreshing after visiting Settings", hosts === 2, `${hosts} hosts shown`);
 
+// BUG-005: a typed address the backend refuses. Expect the error, still on
+// the host list with the text kept, and the list still refreshing.
+await evaluate(`(() => { const i = document.getElementById('manual-addr'); i.value = 'not-an-ip'; i.form.requestSubmit(); })()`);
+await sleep(500);
+await evaluate(`(() => { ui.hosts = []; render(); })()`);
+await sleep(1500);
+const bad = await evaluate(`({ screen: ui.screen, conn: ui.conn, alert: document.getElementById('alert').hidden ? "" : document.getElementById('alert-text').textContent, value: document.getElementById('manual-addr')?.value, hosts: document.querySelectorAll('.hosts li').length })`);
+check(
+  "BUG-005 mistyped address stays on the host list",
+  bad.screen === "browsing" && bad.conn === "idle" && bad.alert.includes("not an address") && bad.value === "not-an-ip" && bad.hosts === 2,
+  JSON.stringify(bad),
+);
+
 // BUG-004: disconnect while a connect is in flight. 192.0.2.1 is TEST-NET-1,
 // never routed, so the client sits in its 2 s connect timeout and the stop
 // has to wait for it. A main-thread call (tray_state) must still answer.
@@ -86,6 +100,15 @@ check("BUG-004 window answers during a slow disconnect", ms < 500, `main thread 
 await sleep(2500);
 const after = await evaluate(`ui.screen`);
 check("BUG-004 the disconnect still finishes", after === "home", `screen ${after}`);
+
+// BUG-005 fix connects before leaving the list, so status events can arrive
+// first. Picking a listed host must still end on "Connected".
+await evaluate(`document.querySelector('[data-act=browse]').click()`);
+await sleep(1500);
+await evaluate(`document.querySelector('.hosts li button:not([aria-disabled])').click()`);
+await sleep(1500);
+const ok = await evaluate(`({ screen: ui.screen, conn: ui.conn, status: document.getElementById('status').textContent })`);
+check("BUG-005 picking a listed host still connects", ok.screen === "client" && ok.conn === "connected", JSON.stringify(ok));
 
 ws.close();
 gui.kill();

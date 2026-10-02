@@ -389,10 +389,14 @@ async function act(name, el, event) {
 }
 
 async function connectTo(addr, name) {
-  await invoke("stop_browsing");
-  Object.assign(ui, { screen: "client", conn: "connecting", peer: name, addr });
-  render();
+  // Connect first: if the address is refused, nothing has changed and the
+  // host list (with what was typed) stays put. It returns at once; the
+  // connecting itself happens in the background.
   await invoke("connect", { addr });
+  await invoke("stop_browsing");
+  Object.assign(ui, { screen: "client", peer: name, addr });
+  // Status events may already have moved it on (connected, retrying).
+  if (ui.conn === "idle") ui.conn = "connecting";
 }
 
 let hostTimer = null;

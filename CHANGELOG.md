@@ -26,6 +26,12 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
   opening a second, idle window
   ([BUG-001](docs/BUGS.md#bug-001-a-client-connects-even-though-the-host-has-not-started-sharing)).
 
+- A mistyped address no longer leaves the screen on "Connecting..."; it stays
+  on the host list with the error and the typed text
+  ([BUG-005](docs/BUGS.md#bug-005-a-mistyped-address-leaves-the-client-stuck-on-connecting)).
+- Demo mode: connecting to a host from the list works (its fake host used to
+  shut down as the list closed).
+
 ### Added
 
 - `tools/check_gui.mjs`: drives the demo GUI and checks the fixes above.
@@ -56,4 +62,5 @@ The first working version: everything up to commit `de6da48`.
 
 ### Known issues
 
-- BUG-001 to BUG-005 in [docs/BUGS.md](docs/BUGS.md).
+- Open leads in [docs/BUGS.md](docs/BUGS.md): BUG-003 may also have
+  network causes on the other computer, not yet checked.

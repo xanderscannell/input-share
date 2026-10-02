@@ -342,7 +342,7 @@ connect and disconnect with no more hangs.
 
 ## BUG-005: a mistyped address leaves the client stuck on "Connecting"
 
-- **Status:** Diagnosed
+- **Status:** Fixed
 - **Reported:** 2026-10-01 (found while fixing BUG-002)
 - **Area:** gui
 
@@ -373,6 +373,29 @@ fails.
 
 ### Decision
 
-Pending.
+Ask the backend to connect before leaving the host list, and switch to the
+client screen only once it has accepted the address. `connect` returns at
+once (the connecting happens on the client's own thread), so a valid address
+looks the same as before. A refused one changes nothing: still on the host
+list, the error shown, the typed text kept (BUG-002), the list refreshing.
+
+Two things this exposed:
+
+- Status events can now arrive before the screen switch. Setting "connecting"
+  unconditionally would overwrite an early "connected" and leave the screen
+  on "Connecting..." for good, so it is set only if nothing has moved it on.
+  *Observed*: without that guard the new check fails on every run.
+- *Observed*, pre-existing: in demo mode, leaving the host list also shut
+  down the fake host, so connecting to it from the list never worked (the old
+  code fails the new check the same way). Real mode was never affected. The
+  demo's fake hosts now stay up while a client uses them and go on
+  disconnect.
 
 ### Fix
+
+`gui/ui/app.js` (`connectTo`) and, for the demo, `gui/src/backend.rs`
+(`stop_browsing`, `disconnect`). Guarded by `tools/check_gui.mjs`: a refused
+address stays on the host list (failed before, passes now), and picking a
+listed host ends on "Connected" (passes, three runs of three). The backend
+test `demo_browsing_finds_two_hosts_and_connects_to_the_paired_one` now
+leaves the list after connecting, as the GUI does.

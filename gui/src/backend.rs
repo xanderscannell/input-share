@@ -241,8 +241,11 @@ impl Backend {
     }
 
     pub fn stop_browsing(&mut self) {
-        self.listener = None; // Drop stops each of these
-        self.peers = None;
+        self.listener = None; // Drop stops it
+        // Demo: the client may be connected to the fake host; it goes on disconnect.
+        if self.client.is_none() {
+            self.peers = None;
+        }
     }
 
     pub fn connect(&mut self, addr: &str) -> Result<(), String> {
@@ -264,6 +267,11 @@ impl Backend {
     pub fn disconnect(&mut self) {
         if let Some(c) = self.client.take() {
             c.stop();
+        }
+        // Demo: done with the fake hosts unless the host list is still open
+        // (connect disconnects first, while the list is open).
+        if self.listener.is_none() {
+            self.peers = None;
         }
     }
 
@@ -373,6 +381,7 @@ mod tests {
         assert!(!hosts[1].paired && hosts[1].name == "OFFICE-PC", "{hosts:?}");
 
         b.connect(&hosts[0].addr).unwrap();
+        b.stop_browsing(); // what the GUI does next: the fake host must stay up
         wait_for("connected", || log.lock().unwrap().iter().any(|e| e.kind == "connected"));
         assert_eq!(b.boot().unwrap().host, hosts[0].addr, "the chosen host is remembered");
         b.shutdown();
