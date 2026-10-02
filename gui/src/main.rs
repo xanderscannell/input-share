@@ -196,6 +196,20 @@ fn main() {
     let theme = flag(&args, "--demo-theme").filter(|t| t == "light" || t == "dark");
     let demo_tray_seq = flag(&args, "--demo-tray").filter(|_| demo);
 
+    // One copy at a time (BUG-001): launching again brings the running copy
+    // forward, even from the tray, instead of opening a second idle window
+    // next to one that is still sharing. Demo mode is exempt so its checks can
+    // run beside the real app. If the check itself fails, start anyway.
+    let instance = if demo {
+        None
+    } else {
+        match input_share_core::win::single_instance(r"Local\input-share-gui") {
+            Ok(Some(first)) => Some(first),
+            Ok(None) => return, // the running copy has been asked to show itself
+            Err(_) => None,
+        }
+    };
+
     tauri::Builder::default()
         .setup(move |app| {
             build_tray(app)?;
@@ -220,6 +234,14 @@ fn main() {
             if let Some(seq) = demo_tray_seq.clone() {
                 let handle = app.handle().clone();
                 std::thread::spawn(move || demo_tray(handle, seq));
+            }
+            if let Some(first) = instance {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    while first.wait() {
+                        show_window(&handle);
+                    }
+                });
             }
             Ok(())
         })

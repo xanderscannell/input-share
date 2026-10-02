@@ -21,6 +21,11 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
   refuses to shut the connection's socket down, or when the other computer
   never closes its end (BUG-004).
 
+- Launching the app while it is already running (for example hidden in the
+  tray, still sharing) now brings the running copy forward instead of
+  opening a second, idle window
+  ([BUG-001](docs/BUGS.md#bug-001-a-client-connects-even-though-the-host-has-not-started-sharing)).
+
 ### Added
 
 - `tools/check_gui.mjs`: drives the demo GUI and checks the fixes above.

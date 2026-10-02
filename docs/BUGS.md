@@ -44,7 +44,7 @@ Commit and test that guards it. Empty until fixed.
 
 ## BUG-001: a client connects even though the host has not started sharing
 
-- **Status:** Diagnosed (likely cause; confirm on the host)
+- **Status:** Fixed
 - **Reported:** 2026-10-01
 - **Area:** gui
 
@@ -79,9 +79,32 @@ from this one.
 
 ### Decision
 
-Pending.
+Allow one copy of the GUI per signed-in user. A second launch asks the
+running copy to show its window (also when it is hidden in the tray) and
+exits. That is what launching the app again almost always means, and it
+makes a forgotten copy impossible to miss.
+
+- Done with a named event (`Local\input-share-gui`) through the `windows`
+  crate core already uses (one more feature, `Win32_Security`), instead of
+  adding `tauri-plugin-single-instance`. The first copy waits on the event
+  and shows its window when it fires. The second copy signals it and first
+  calls `AllowSetForegroundWindow`, since Windows does not let a background
+  process take the foreground on its own.
+- Demo mode is exempt, so the demo checks can run next to the real app.
+- If creating the event fails, the app starts anyway: a missing guard is
+  better than an app that will not open.
 
 ### Fix
+
+`core/src/win.rs` (`single_instance`), used at the top of `main` in
+`gui/src/main.rs`. Guarded by the unit test
+`a_second_copy_wakes_the_first_and_is_told_to_exit`. *Observed* with two
+real-mode debug copies: the second exited by itself (code 0) and the first,
+minimized, came back to the front. The tray case uses the same
+`show_window` as the tray's "Show input-share", already checked with
+`--demo-tray close-show`. A window hidden from outside the app (not through
+Tauri) does not come back, because Tauri still thinks it is shown; the app
+never hides itself that way.
 
 ---
 
