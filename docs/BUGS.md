@@ -105,6 +105,7 @@ minimized, came back to the front. The tray case uses the same
 `--demo-tray close-show`. A window hidden from outside the app (not through
 Tauri) does not come back, because Tauri still thinks it is shown; the app
 never hides itself that way.
+*Observed* (2026-10-01): confirmed on both computers in the release build.
 
 ---
 
