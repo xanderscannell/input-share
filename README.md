@@ -20,6 +20,10 @@ encrypted end to end, with a tray app on top.
 - **Crossing:** the pointer moves between the two screens at the edge you
   choose, landing at the same relative height. Layouts with several monitors
   of different sizes are handled monitor by monitor.
+- **Clipboard:** text you copy on one computer can be pasted on the other
+  once the pointer crosses. Only text copied since the session started
+  crosses, so an image or formatted text on the other side is never replaced
+  with stale text. Text over about 64 KB stays where it was copied.
 - **Encrypted and paired:** every keystroke travels encrypted (Noise
   `NNpsk0` with a 256-bit shared key). A computer without your key cannot
   read or send input.
@@ -143,7 +147,8 @@ These come from Windows, not from bugs:
   side also runs as administrator.
 - The lock screen, Ctrl+Alt+Del and UAC prompts are on a secure desktop that
   no program can inject into.
-- One computer controlled at a time. No clipboard sharing or file drag yet.
+- One computer controlled at a time. The clipboard shares text only, and
+  there is no file drag yet.
 
 ## Development
 

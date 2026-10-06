@@ -7,7 +7,16 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Clipboard sharing for text. When the pointer crosses, text copied on the
+  computer it left can be pasted on the other one. Images, files and
+  formatting are not shared, and neither is text over about 64 KB.
+
+### Changed
+
+- Protocol version 2. Both computers need this version; an older copy on
+  the other end is refused with a version message.
 
 ## [0.1.1] - 2026-10-01
 

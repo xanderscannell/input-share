@@ -1,6 +1,6 @@
-// Wire messages: 1 tag byte + fixed little-endian fields.
+// Wire messages: 1 tag byte + fixed little-endian fields (Clipboard: UTF-8 text).
 
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Button {
@@ -11,7 +11,7 @@ pub enum Button {
     X2 = 4,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
     Hello { version: u16, w: i32, h: i32 },
     Enter { y_frac: f32 },
@@ -21,6 +21,8 @@ pub enum Msg {
     Wheel { vertical: bool, delta: i32 },
     Key { scancode: u16, extended: bool, down: bool },
     Heartbeat,
+    /// Sent just before control crosses to the other computer.
+    Clipboard { text: String },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,6 +68,10 @@ impl Msg {
                 b.extend([extended as u8, down as u8]);
             }
             Msg::Heartbeat => b.push(8),
+            Msg::Clipboard { ref text } => {
+                b.push(9);
+                b.extend(text.as_bytes());
+            }
         }
         b
     }
@@ -80,6 +86,7 @@ impl Msg {
             6 => 5,
             7 => 4,
             8 => 0,
+            9 => p.len(),
             _ => return Err(DecodeError::UnknownTag(tag)),
         };
         if p.len() != want {
@@ -111,6 +118,7 @@ impl Msg {
             }
             6 => Msg::Wheel { vertical: bool_at(0)?, delta: i32_at(1) },
             7 => Msg::Key { scancode: u16_at(0), extended: bool_at(2)?, down: bool_at(3)? },
+            9 => Msg::Clipboard { text: String::from_utf8(p.to_vec()).map_err(|_| DecodeError::BadValue)? },
             _ => Msg::Heartbeat,
         })
     }
@@ -130,13 +138,15 @@ mod tests {
             Msg::Wheel { vertical: false, delta: -120 },
             Msg::Key { scancode: 0x1D, extended: true, down: false },
             Msg::Heartbeat,
+            Msg::Clipboard { text: "héllo
+".into() },
         ]
     }
 
     #[test]
     fn round_trip_every_message() {
         for m in all() {
-            assert_eq!(Msg::decode(&m.encode()), Ok(m), "{m:?}");
+            assert_eq!(Msg::decode(&m.encode()), Ok(m.clone()), "{m:?}");
         }
         for b in [Button::Left, Button::Right, Button::Middle, Button::X1, Button::X2] {
             let m = Msg::Button { button: b, down: false };
@@ -146,7 +156,8 @@ mod tests {
 
     #[test]
     fn rejects_truncated_and_trailing() {
-        for m in all() {
+        // Clipboard is any length, so every cut of it is a valid (shorter) message.
+        for m in all().into_iter().filter(|m| !matches!(m, Msg::Clipboard { .. })) {
             let e = m.encode();
             for n in 1..e.len() {
                 assert!(matches!(Msg::decode(&e[..n]), Err(DecodeError::BadLength { .. })), "{m:?} cut at {n}");
@@ -160,11 +171,12 @@ mod tests {
 
     #[test]
     fn rejects_unknown_tags_and_bad_values() {
-        for t in [0u8, 9, 255] {
+        for t in [0u8, 10, 255] {
             assert_eq!(Msg::decode(&[t]), Err(DecodeError::UnknownTag(t)));
         }
         assert_eq!(Msg::decode(&[5, 5, 0]), Err(DecodeError::BadValue));
         assert_eq!(Msg::decode(&[5, 0, 2]), Err(DecodeError::BadValue));
         assert_eq!(Msg::decode(&[7, 0, 0, 1, 7]), Err(DecodeError::BadValue));
+        assert_eq!(Msg::decode(&[9, 0xC3]), Err(DecodeError::BadValue), "cut mid-character");
     }
 }

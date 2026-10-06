@@ -87,8 +87,9 @@ pub struct Sender {
 impl Sender {
     pub fn send(&self, msg: &Msg) -> io::Result<()> {
         let mut out = self.out.lock().unwrap();
-        let mut ct = [0u8; 64];
-        let n = self.noise.write_message(out.1, &msg.encode(), &mut ct).map_err(noise_err)?;
+        let pt = msg.encode();
+        let mut ct = vec![0u8; pt.len() + 16]; // 16: the AEAD tag
+        let n = self.noise.write_message(out.1, &pt, &mut ct).map_err(noise_err)?;
         out.1 += 1;
         write_frame(&out.0, &ct[..n])
     }
@@ -123,7 +124,7 @@ impl Receiver {
     /// `TIMEOUT`) returns an error for which `is_timeout` is true.
     pub fn recv(&mut self) -> io::Result<Msg> {
         let n = read_frame(&self.stream, &mut self.buf)?;
-        let mut pt = [0u8; 64];
+        let mut pt = vec![0u8; n];
         let m = self.noise.read_message(self.nonce, &self.buf[..n], &mut pt).map_err(noise_err)?;
         self.nonce += 1;
         Msg::decode(&pt[..m]).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))
@@ -189,9 +190,10 @@ mod tests {
             Msg::Button { button: Button::Left, down: true },
             Msg::Key { scancode: 0x1E, extended: false, down: true },
             Msg::Heartbeat,
+            Msg::Clipboard { text: "x".repeat(crate::clipboard::MAX_TEXT) }, // the biggest message
         ];
-        for m in msgs {
-            stx.send(&m).unwrap();
+        for m in &msgs {
+            stx.send(m).unwrap();
         }
         for m in msgs {
             assert_eq!(crx.recv().unwrap(), m);

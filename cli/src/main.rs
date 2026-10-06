@@ -1,7 +1,7 @@
 use input_share_core::edge::{Edge, Rect};
 use input_share_core::layout::Layout;
 use input_share_core::status::{OnStatus, Status};
-use input_share_core::{client, net, server, win};
+use input_share_core::{client, clipboard, net, server, win};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -85,12 +85,12 @@ fn run(args: &[String]) -> Result<(), String> {
             let _client = if args.iter().any(|a| a == "--dry-run") {
                 let screen = screen()?;
                 let layout = Box::new(move || Layout::single(screen));
-                client::start(host, load_key()?, edge, layout, Box::new(client::print_act), print_status())
+                client::start(host, load_key()?, edge, layout, Box::new(client::print_act), None, print_status())
             } else {
                 let key = load_key()?;
                 win::dpi_aware();
                 let sink = Box::new(client::send_input_sink());
-                client::start(host, key, edge, Box::new(win::layout), sink, print_status())
+                client::start(host, key, edge, Box::new(win::layout), sink, Some(clipboard::WINDOWS), print_status())
             };
             park_forever()
         }

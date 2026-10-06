@@ -7,6 +7,7 @@
 // client's input goes to a sink that drops it. Its home folder is a temp dir.
 
 use input_share_core::client::{self, ClientHandle};
+use input_share_core::clipboard;
 use input_share_core::config::{self, Home};
 use input_share_core::discovery::{self, Announcer, Beacon, Listener};
 use input_share_core::edge::{Edge, Rect};
@@ -252,12 +253,12 @@ impl Backend {
         self.disconnect();
         let key = self.key()?;
         addr.parse::<SocketAddr>().map_err(|_| format!("{addr} is not an address like 192.168.1.20:24800."))?;
-        let (layout, sink): (client::LayoutFn, client::BoxSink) = if self.demo {
-            (Box::new(|| Layout::single(DEMO_SCREEN)), Box::new(|_| {})) // demo: input goes nowhere
+        let (layout, sink, clip): (client::LayoutFn, client::BoxSink, _) = if self.demo {
+            (Box::new(|| Layout::single(DEMO_SCREEN)), Box::new(|_| {}), None) // demo: input goes nowhere
         } else {
-            (Box::new(win::layout), Box::new(client::send_input_sink()))
+            (Box::new(win::layout), Box::new(client::send_input_sink()), Some(clipboard::WINDOWS))
         };
-        let c = client::start(addr, key, self.edge(), layout, sink, self.on_status.clone());
+        let c = client::start(addr, key, self.edge(), layout, sink, clip, self.on_status.clone());
         self.client = Some(c);
         let mut cfg = self.home.load_config().map_err(err)?;
         cfg.set(config::HOST, addr).map_err(err)?;

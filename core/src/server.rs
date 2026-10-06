@@ -5,6 +5,7 @@
 // wait on a channel. `on_input` does no I/O; outgoing messages go onto a
 // channel that a writer thread drains to the socket.
 
+use crate::clipboard::{self, Tracker};
 use crate::edge::Edge;
 use crate::layout::Layout;
 use crate::keys::Held;
@@ -63,6 +64,8 @@ pub struct Server {
     /// Remote/Local changes, drained by a pump thread: `on_input` runs inside
     /// the hook and must never call out to a status callback directly.
     status: Option<mpsc::Sender<Status>>,
+    /// Real mode only: tests and demo mode never touch this computer's clipboard.
+    clipboard: Option<clipboard::Clipboard>,
 }
 
 impl Server {
@@ -75,6 +78,7 @@ impl Server {
             local: Held::default(),
             phys: Held::default(),
             status: None,
+            clipboard: None,
         }
     }
 
@@ -188,15 +192,27 @@ fn session(
 ) -> io::Result<()> {
     let peer = stream.peer_addr()?;
     let (tx, mut rx) = net::handshake(stream, key, false)?;
-    let desk = shared.lock().unwrap().layout.bounds();
+    let (desk, cb) = {
+        let s = shared.lock().unwrap();
+        (s.layout.bounds(), s.clipboard)
+    };
+    let clip = Arc::new(Mutex::new(cb.map(Tracker::new)));
     tx.send(&Msg::Hello { version: VERSION, w: desk.w, h: desk.h })?;
     tx.spawn_heartbeat(net::HEARTBEAT);
 
     let (out, queue) = mpsc::channel();
     let writer = {
-        let tx = tx.clone();
+        let (tx, clip) = (tx.clone(), clip.clone());
         thread::spawn(move || {
             for m in queue {
+                // The clipboard goes ahead of control. Read here, never in the
+                // hook that queued the Enter.
+                if matches!(m, Msg::Enter { .. })
+                    && let Some(text) = clip.lock().unwrap().as_mut().and_then(Tracker::outgoing)
+                    && tx.send(&Msg::Clipboard { text }).is_err()
+                {
+                    break;
+                }
                 if tx.send(&m).is_err() {
                     break;
                 }
@@ -227,6 +243,11 @@ fn session(
                 let p = shared.lock().unwrap().on_leave(y_frac);
                 if let Some((x, y)) = p {
                     set_cursor(x, y);
+                }
+            }
+            Ok(Msg::Clipboard { text }) => {
+                if let Some(c) = clip.lock().unwrap().as_mut() {
+                    c.incoming(&text);
                 }
             }
             Ok(Msg::Hello { version, .. }) if version != VERSION => {
@@ -282,8 +303,8 @@ pub struct ServerHandle {
 }
 
 /// Bind and accept clients on a background thread. With `hooks`, also install
-/// the low-level hooks (real input) and re-read the monitor layout every 2 s;
-/// without, feed input through `input()`.
+/// the low-level hooks (real input), re-read the monitor layout every 2 s and
+/// share the clipboard; without, feed input through `input()`.
 pub fn start(bind: &str, key: Key, edge: Edge, layout: Layout, hooks: bool, on_status: OnStatus) -> io::Result<ServerHandle> {
     let listener = TcpListener::bind(bind)?;
     listener.set_nonblocking(true)?;
@@ -291,7 +312,11 @@ pub fn start(bind: &str, key: Key, edge: Edge, layout: Layout, hooks: bool, on_s
     let shared: Shared = Arc::new(Mutex::new(Server::new(edge, layout)));
 
     let (status_tx, status_rx) = mpsc::channel();
-    shared.lock().unwrap().status = Some(status_tx);
+    {
+        let mut s = shared.lock().unwrap();
+        s.status = Some(status_tx);
+        s.clipboard = hooks.then_some(clipboard::WINDOWS);
+    }
     // Real mode hides the parked cursor while Remote. Restore first, in case an
     // earlier run crashed with it hidden. The pump does it (never the hook):
     // disconnect, the panic hotkey and stop all report Local through here, and

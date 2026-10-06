@@ -52,7 +52,7 @@ fn connected_with_a_held() -> (server::ServerHandle, client::ClientHandle, Log<S
     let acts: Log<Act> = Default::default();
     let a = acts.clone();
     let (c_on, c_log) = recorder();
-    let client = client::start(&addr, key, Edge::Right, laptop(), Box::new(move |act| a.lock().unwrap().push(act)), c_on);
+    let client = client::start(&addr, key, Edge::Right, laptop(), Box::new(move |act| a.lock().unwrap().push(act)), None, c_on);
 
     wait_for("server Connected", || has(&s_log, |s| matches!(s, Status::Connected(_))));
     server.input(Input::Move { x: 1919, y: 540 });
@@ -126,7 +126,7 @@ fn stop_is_prompt_with_no_client() {
     assert_port_free(&addr);
 
     let (c_on, c_log) = recorder();
-    let client = client::start(&addr, keygen(), Edge::Right, laptop(), Box::new(|_| {}), c_on);
+    let client = client::start(&addr, keygen(), Edge::Right, laptop(), Box::new(|_| {}), None, c_on);
     wait_for("client Retrying", || has(&c_log, |s| matches!(s, Status::Retrying(_))));
     let t = Instant::now();
     client.stop();

@@ -2,6 +2,7 @@
 // injected input. Injection goes through a sink so `--dry-run` can print
 // instead of calling SendInput.
 
+use crate::clipboard::{Clipboard, Tracker};
 use crate::edge::Edge;
 use crate::layout::{ClientCursor, Layout, Step};
 use crate::keys::Held;
@@ -20,7 +21,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
 
 /// Something to inject on this machine.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Act {
     MoveTo(i32, i32),
     /// A Key, Button or Wheel message.
@@ -158,8 +159,16 @@ pub struct ClientHandle {
 }
 
 /// Connect to `addr` (default port if none given) and reconnect with backoff
-/// until stopped.
-pub fn start(addr: &str, key: Key, edge: Edge, layout: LayoutFn, mut sink: BoxSink, on_status: OnStatus) -> ClientHandle {
+/// until stopped. `clipboard`: share this one (None in dry runs and tests).
+pub fn start(
+    addr: &str,
+    key: Key,
+    edge: Edge,
+    layout: LayoutFn,
+    mut sink: BoxSink,
+    clipboard: Option<Clipboard>,
+    on_status: OnStatus,
+) -> ClientHandle {
     let addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:{}", net::DEFAULT_PORT) };
     let stop = Arc::new(AtomicBool::new(false));
     let sock = Arc::new(Mutex::new(None::<TcpStream>));
@@ -177,7 +186,7 @@ pub fn start(addr: &str, key: Key, edge: Edge, layout: LayoutFn, mut sink: BoxSi
                         if stop.load(Ordering::SeqCst) {
                             break;
                         }
-                        let reason = match session(stream, &key, edge, &*layout, &mut *sink, &on_status, &stop) {
+                        let reason = match session(stream, &key, edge, &*layout, &mut *sink, clipboard, &on_status, &stop) {
                             Ok(()) => "closed".to_string(),
                             Err(e) => e.to_string(),
                         };
@@ -229,12 +238,14 @@ impl Drop for ClientHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one per thing a session uses; a struct would only rename them
 fn session(
     stream: TcpStream,
     key: &Key,
     edge: Edge,
     layout: &dyn Fn() -> Layout,
     sink: Sink,
+    clipboard: Option<Clipboard>,
     on_status: &OnStatus,
     stop: &AtomicBool,
 ) -> io::Result<()> {
@@ -246,6 +257,7 @@ fn session(
     tx.spawn_heartbeat(net::HEARTBEAT);
 
     let mut held = Held::default();
+    let mut clip = clipboard.map(Tracker::new);
     let mut cursor: Option<ClientCursor> = None;
     let res = loop {
         let m = match rx.recv() {
@@ -281,10 +293,21 @@ fn session(
                         cursor = None;
                         on_status(Status::Local);
                         release_all(&mut held, sink);
+                        // The clipboard goes ahead of control.
+                        if let Some(text) = clip.as_mut().and_then(Tracker::outgoing)
+                            && let Err(e) = tx.send(&Msg::Clipboard { text })
+                        {
+                            break Err(e);
+                        }
                         if let Err(e) = tx.send(&Msg::Leave { y_frac }) {
                             break Err(e);
                         }
                     }
+                }
+            }
+            Msg::Clipboard { text } => {
+                if let Some(c) = &mut clip {
+                    c.incoming(&text);
                 }
             }
             Msg::Key { .. } | Msg::Button { .. } | Msg::Wheel { .. } => {
@@ -325,7 +348,7 @@ mod tests {
             let on: OnStatus = Arc::new(|_| {});
             let layout = || Layout::single(crate::edge::Rect { left: 0, top: 0, w: 100, h: 100 });
             let stop = AtomicBool::new(true);
-            let r = session(TcpStream::connect(addr).unwrap(), &key, Edge::Right, &layout, &mut |_| {}, &on, &stop);
+            let r = session(TcpStream::connect(addr).unwrap(), &key, Edge::Right, &layout, &mut |_| {}, None, &on, &stop);
             let _ = done.send(r.is_ok());
         });
         let _peer = server.join().unwrap();
