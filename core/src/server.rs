@@ -207,11 +207,11 @@ fn session(
             for m in queue {
                 // The clipboard goes ahead of control. Read here, never in the
                 // hook that queued the Enter.
-                if matches!(m, Msg::Enter { .. })
-                    && let Some(text) = clip.lock().unwrap().as_mut().and_then(Tracker::outgoing)
-                    && tx.send(&Msg::Clipboard { text }).is_err()
-                {
-                    break;
+                if matches!(m, Msg::Enter { .. }) {
+                    let parts = clip.lock().unwrap().as_mut().map(Tracker::outgoing).unwrap_or_default();
+                    if parts.iter().any(|p| tx.send(p).is_err()) {
+                        break;
+                    }
                 }
                 if tx.send(&m).is_err() {
                     break;
@@ -245,9 +245,9 @@ fn session(
                     set_cursor(x, y);
                 }
             }
-            Ok(Msg::Clipboard { text }) => {
+            Ok(Msg::Clipboard { last, data }) => {
                 if let Some(c) = clip.lock().unwrap().as_mut() {
-                    c.incoming(&text);
+                    c.incoming(last, data);
                 }
             }
             Ok(Msg::Hello { version, .. }) if version != VERSION => {

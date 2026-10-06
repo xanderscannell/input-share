@@ -190,7 +190,7 @@ mod tests {
             Msg::Button { button: Button::Left, down: true },
             Msg::Key { scancode: 0x1E, extended: false, down: true },
             Msg::Heartbeat,
-            Msg::Clipboard { text: "x".repeat(crate::clipboard::MAX_TEXT) }, // the biggest message
+            Msg::Clipboard { last: false, data: vec![7; crate::clipboard::MAX_CHUNK] }, // the biggest message
         ];
         for m in &msgs {
             stx.send(m).unwrap();

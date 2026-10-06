@@ -1,4 +1,4 @@
-// Wire messages: 1 tag byte + fixed little-endian fields (Clipboard: UTF-8 text).
+// Wire messages: 1 tag byte + fixed little-endian fields (Clipboard: a flag, then bytes).
 
 pub const VERSION: u16 = 2;
 
@@ -21,8 +21,9 @@ pub enum Msg {
     Wheel { vertical: bool, delta: i32 },
     Key { scancode: u16, extended: bool, down: bool },
     Heartbeat,
-    /// Sent just before control crosses to the other computer.
-    Clipboard { text: String },
+    /// Part of a clipboard (see `clipboard`), sent just before control
+    /// crosses to the other computer. `last` marks the final part.
+    Clipboard { last: bool, data: Vec<u8> },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -68,9 +69,9 @@ impl Msg {
                 b.extend([extended as u8, down as u8]);
             }
             Msg::Heartbeat => b.push(8),
-            Msg::Clipboard { ref text } => {
-                b.push(9);
-                b.extend(text.as_bytes());
+            Msg::Clipboard { last, ref data } => {
+                b.extend([9, last as u8]);
+                b.extend(data);
             }
         }
         b
@@ -86,7 +87,7 @@ impl Msg {
             6 => 5,
             7 => 4,
             8 => 0,
-            9 => p.len(),
+            9 => p.len().max(1), // any length, but the flag must be there
             _ => return Err(DecodeError::UnknownTag(tag)),
         };
         if p.len() != want {
@@ -118,7 +119,7 @@ impl Msg {
             }
             6 => Msg::Wheel { vertical: bool_at(0)?, delta: i32_at(1) },
             7 => Msg::Key { scancode: u16_at(0), extended: bool_at(2)?, down: bool_at(3)? },
-            9 => Msg::Clipboard { text: String::from_utf8(p.to_vec()).map_err(|_| DecodeError::BadValue)? },
+            9 => Msg::Clipboard { last: bool_at(0)?, data: p[1..].to_vec() },
             _ => Msg::Heartbeat,
         })
     }
@@ -138,8 +139,7 @@ mod tests {
             Msg::Wheel { vertical: false, delta: -120 },
             Msg::Key { scancode: 0x1D, extended: true, down: false },
             Msg::Heartbeat,
-            Msg::Clipboard { text: "héllo
-".into() },
+            Msg::Clipboard { last: true, data: vec![0, 255, 7] },
         ]
     }
 
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn rejects_truncated_and_trailing() {
-        // Clipboard is any length, so every cut of it is a valid (shorter) message.
+        // Clipboard is any length, so every cut of it past the flag is a valid (shorter) message.
         for m in all().into_iter().filter(|m| !matches!(m, Msg::Clipboard { .. })) {
             let e = m.encode();
             for n in 1..e.len() {
@@ -177,6 +177,7 @@ mod tests {
         assert_eq!(Msg::decode(&[5, 5, 0]), Err(DecodeError::BadValue));
         assert_eq!(Msg::decode(&[5, 0, 2]), Err(DecodeError::BadValue));
         assert_eq!(Msg::decode(&[7, 0, 0, 1, 7]), Err(DecodeError::BadValue));
-        assert_eq!(Msg::decode(&[9, 0xC3]), Err(DecodeError::BadValue), "cut mid-character");
+        assert_eq!(Msg::decode(&[9]), Err(DecodeError::BadLength { tag: 9, got: 0 }), "no flag");
+        assert_eq!(Msg::decode(&[9, 2, 0]), Err(DecodeError::BadValue));
     }
 }

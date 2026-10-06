@@ -294,9 +294,8 @@ fn session(
                         on_status(Status::Local);
                         release_all(&mut held, sink);
                         // The clipboard goes ahead of control.
-                        if let Some(text) = clip.as_mut().and_then(Tracker::outgoing)
-                            && let Err(e) = tx.send(&Msg::Clipboard { text })
-                        {
+                        let parts = clip.as_mut().map(Tracker::outgoing).unwrap_or_default();
+                        if let Err(e) = parts.iter().try_for_each(|p| tx.send(p)) {
                             break Err(e);
                         }
                         if let Err(e) = tx.send(&Msg::Leave { y_frac }) {
@@ -305,9 +304,9 @@ fn session(
                     }
                 }
             }
-            Msg::Clipboard { text } => {
+            Msg::Clipboard { last, data } => {
                 if let Some(c) = &mut clip {
-                    c.incoming(&text);
+                    c.incoming(last, data);
                 }
             }
             Msg::Key { .. } | Msg::Button { .. } | Msg::Wheel { .. } => {

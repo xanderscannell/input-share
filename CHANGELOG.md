@@ -9,9 +9,11 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
 
 ### Added
 
-- Clipboard sharing for text. When the pointer crosses, text copied on the
-  computer it left can be pasted on the other one. Images, files and
-  formatting are not shared, and neither is text over about 64 KB.
+- Clipboard sharing for text and its formatting (HTML and RTF, as browsers,
+  Word and Outlook copy it). When the pointer crosses, what was copied on
+  the computer it left can be pasted on the other one. Up to 1 MB; past
+  that the formatting is dropped and the plain text sent alone. Images and
+  files are not shared yet.
 
 ### Changed
 
