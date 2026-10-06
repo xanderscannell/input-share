@@ -7,14 +7,20 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-10-06
+
 ### Added
 
 - Clipboard sharing for text, its formatting (HTML and RTF, as browsers,
   Word and Outlook copy it) and images. When the pointer crosses, what was
-  copied on the computer it left can be pasted on the other one. Up to
-  1 MB goes along with the crossing; anything bigger, up to 100 MB, follows
-  on a second connection to the same port, so the pointer never waits for
-  it. Past 100 MB only the plain text is sent.
+  copied on the computer it left can be pasted on the other one. Only what
+  was copied since the session started crosses, so crossing back never
+  replaces the other computer's clipboard with stale contents. Up to 1 MB
+  goes along with the crossing; anything bigger, up to 100 MB, follows on a
+  second connection to the same port, so the pointer never waits for it.
+  Past 100 MB only the plain text is sent.
 - Copying files and folders, up to 100 MB in all. They arrive in
   `%TEMP%\input-share-clipboard` and paste from there. Cut works as copy, and
   links inside a folder are left out.
@@ -23,6 +29,16 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
 
 - Protocol version 2. Both computers need this version; an older copy on
   the other end is refused with a version message.
+- A second computer connecting while one is already being controlled is
+  turned away and retries every few seconds, instead of waiting in line.
+
+### Known issues
+
+- Nothing shows that a big clipboard is still on its way. Pasting in the
+  few seconds before it lands gives the previous clipboard.
+- When a clipboard cannot be shared (over 100 MB, or a file removed before
+  it was read), nothing arrives and the tray app shows no message; only the
+  command-line version prints why.
 
 ## [0.1.1] - 2026-10-01
 
@@ -77,6 +93,7 @@ The first release.
 - Settings locked while sharing, looking for hosts or connected.
 - App icon, README and MIT license.
 
-[Unreleased]: https://github.com/xanderscannell/input-share/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/xanderscannell/input-share/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/xanderscannell/input-share/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/xanderscannell/input-share/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/xanderscannell/input-share/releases/tag/v0.1.0

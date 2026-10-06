@@ -1642,14 +1642,14 @@ dependencies = [
 
 [[package]]
 name = "input-share"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "input-share-core",
 ]
 
 [[package]]
 name = "input-share-core"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "blake2",
  "miniz_oxide 0.8.9",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "input-share-gui"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "input-share-core",
  "serde",
