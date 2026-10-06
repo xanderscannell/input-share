@@ -20,13 +20,18 @@ encrypted end to end, with a tray app on top.
 - **Crossing:** the pointer moves between the two screens at the edge you
   choose, landing at the same relative height. Layouts with several monitors
   of different sizes are handled monitor by monitor.
-- **Clipboard:** text and images you copy on one computer can be pasted on
-  the other once the pointer crosses, with formatting (bold, links, tables)
-  when copied from a browser, Word or Outlook. Only what you copied since
-  the session started crosses, so crossing back never replaces the other
-  computer's clipboard with stale contents. Up to 100 MB: a big image
-  arrives a moment after the pointer, without holding it up. Past 100 MB
-  only the plain text is sent, if it fits.
+- **Clipboard:** text, images, files and folders you copy on one computer
+  can be pasted on the other once the pointer crosses, with formatting
+  (bold, links, tables) when copied from a browser, Word or Outlook. Only
+  what you copied since the session started crosses, so crossing back never
+  replaces the other computer's clipboard with stale contents. Up to 100 MB
+  in all: a big image or file arrives a moment after the pointer, without
+  holding it up, so a paste right away may still give the old clipboard.
+  Past 100 MB only the plain text is sent, if there is any.
+- **Copied files** arrive in `%TEMP%\input-share-clipboard` (emptied each
+  time new ones arrive), and pasting copies them from there. Cut works as
+  copy: the original is never deleted. Shortcuts and links inside a folder
+  are left out.
 - **Encrypted and paired:** every keystroke travels encrypted (Noise
   `NNpsk0` with a 256-bit shared key). A computer without your key cannot
   read or send input.
@@ -150,8 +155,9 @@ These come from Windows, not from bugs:
   side also runs as administrator.
 - The lock screen, Ctrl+Alt+Del and UAC prompts are on a secure desktop that
   no program can inject into.
-- One computer controlled at a time. The clipboard shares text, formatting
-  and images, not files, and there is no file drag yet.
+- One computer controlled at a time. There is no file drag yet; copy and
+  paste instead. Attachments copied straight out of Outlook are not files
+  on disk, so they do not cross; save them first.
 
 ## Development
 

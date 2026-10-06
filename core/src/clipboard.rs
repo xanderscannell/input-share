@@ -7,17 +7,22 @@
 // The clipboard travels as one blob, deflated and split over Clipboard
 // messages. Per format: a kind byte, a u32 LE length, then the bytes. Text is
 // UTF-8; HTML and RTF are Windows' own bytes without the terminating NUL; an
-// image is a CF_DIBV5 (a BITMAPV5HEADER, then the pixels).
+// image is a CF_DIBV5 (a BITMAPV5HEADER, then the pixels). Copied files are
+// their paths (UTF-8, NUL between them) on this computer, and on the wire a
+// `files` archive of what they hold, read as the transfer starts.
 //
-// A small blob goes just ahead of the crossing. A big one would hold the
-// crossing up, so an Offer goes instead and the blob moves over a second
-// connection (a transfer) in the background. The client always opens that
-// connection, pulling from the server or pushing to it, because the server is
-// the side that accepts connections.
+// A small blob goes just ahead of the crossing. A big one, or any files,
+// would hold the crossing up, so an Offer goes instead and the blob moves
+// over a second connection (a transfer) in the background. The client always
+// opens that connection, pulling from the server or pushing to it, because
+// the server is the side that accepts connections.
 
+use crate::files;
 use crate::net::{Receiver, Sender};
 use crate::proto::Msg;
+use std::borrow::Cow;
 use std::io;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -30,8 +35,9 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
 use windows::core::w;
 
-// These live in the Win32_System_Ole feature, too big to enable for two constants.
+// These live in the Win32_System_Ole feature, too big to enable for three constants.
 const CF_UNICODETEXT: u32 = 13;
+const CF_HDROP: u32 = 15;
 const CF_DIBV5: u32 = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +46,7 @@ pub enum Format {
     Html = 1,
     Rtf = 2,
     Image = 3,
+    Files = 4,
 }
 
 /// A clipboard's shareable formats, in the order apps should see them.
@@ -64,9 +71,24 @@ pub struct Clipboard {
     /// Empty when the clipboard holds none of the shared formats.
     pub get: fn() -> Contents,
     pub set: fn(&Contents),
+    /// The folder files from the other computer are unpacked into. Emptied
+    /// each time new ones arrive.
+    pub received: fn() -> PathBuf,
 }
 
-pub const WINDOWS: Clipboard = Clipboard { seq: win_seq, get: win_get, set: win_set };
+pub const WINDOWS: Clipboard =
+    Clipboard { seq: win_seq, get: win_get, set: win_set, received: || std::env::temp_dir().join("input-share-clipboard") };
+
+/// A Files entry's paths.
+pub fn paths(data: &[u8]) -> Vec<PathBuf> {
+    String::from_utf8_lossy(data).split('\0').filter(|p| !p.is_empty()).map(PathBuf::from).collect()
+}
+
+/// Paths as a Files entry.
+pub fn files_entry(paths: &[PathBuf]) -> (Format, Vec<u8>) {
+    let joined: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    (Format::Files, joined.join("\0").into_bytes())
+}
 
 pub fn encode(c: &Contents) -> Vec<u8> {
     let mut b = Vec::new();
@@ -89,6 +111,7 @@ pub fn decode(mut b: &[u8]) -> Option<Contents> {
             1 => Some(Format::Html),
             2 => Some(Format::Rtf),
             3 => Some(Format::Image),
+            4 => Some(Format::Files),
             _ => None,
         };
         if let Some(f) = format {
@@ -104,8 +127,27 @@ fn compress(blob: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec(blob, 1)
 }
 
-fn unpack(z: &[u8]) -> Option<Contents> {
+fn unzip(z: &[u8]) -> Option<Contents> {
     decode(&miniz_oxide::inflate::decompress_to_vec_with_limit(z, MAX_SIZE).ok()?)
+}
+
+/// The blob as it goes on the wire: each Files entry's paths replaced by the
+/// files themselves, read now. Other blobs pass through untouched.
+fn with_files(blob: &[u8]) -> io::Result<Cow<'_, [u8]>> {
+    let Some(mut c) = decode(blob) else { return Err(io::Error::other("unreadable clipboard")) };
+    if !c.iter().any(|(f, _)| *f == Format::Files) {
+        return Ok(Cow::Borrowed(blob));
+    }
+    for (format, data) in &mut c {
+        if *format == Format::Files {
+            *data = files::pack(&paths(data), MAX_SIZE)?;
+        }
+    }
+    let blob = encode(&c);
+    if blob.len() > MAX_SIZE {
+        return Err(io::Error::other(format!("clipboard is over the {MAX_SIZE}-byte limit")));
+    }
+    Ok(Cow::Owned(blob))
 }
 
 /// A compressed blob as Clipboard messages, the last one marked.
@@ -150,7 +192,8 @@ impl Tracker {
     }
 
     /// Nothing unless the clipboard changed since the last `outgoing` or
-    /// `incoming`, holds a shared format, and fits.
+    /// `incoming`, holds a shared format, and fits. Files are always Big:
+    /// they are read only once the transfer starts.
     pub fn outgoing(&mut self) -> Outgoing {
         let seq = (self.cb.seq)();
         if seq == self.seen {
@@ -161,6 +204,7 @@ impl Tracker {
         if all.is_empty() {
             return Outgoing::Nothing;
         }
+        let has_files = all.iter().any(|(f, _)| *f == Format::Files);
         let mut blob = encode(&all);
         if blob.len() > MAX_SIZE {
             // An image or formatting is what makes it big; the text alone may fit.
@@ -171,7 +215,7 @@ impl Tracker {
             return Outgoing::Nothing;
         }
         self.generation += 1;
-        if blob.len() <= MAX_INLINE {
+        if blob.len() <= MAX_INLINE && !has_files {
             return Outgoing::Inline(parts(&compress(&blob)).collect());
         }
         let blob = Arc::new(blob);
@@ -222,12 +266,23 @@ impl Tracker {
     }
 
     fn apply(&mut self, z: &[u8]) {
-        match unpack(z) {
-            Some(c) if !c.is_empty() => {
+        let c = unzip(z).filter(|c| !c.is_empty()).ok_or_else(|| "was unreadable or too big".to_string());
+        // Files arrive as an archive: unpack it, and paste the unpacked copies.
+        let c = c.and_then(|mut c| {
+            for (format, data) in &mut c {
+                if *format == Format::Files {
+                    let top = files::unpack(data, &(self.cb.received)()).map_err(|e| format!("had files that could not be saved: {e}"))?;
+                    *data = files_entry(&top).1;
+                }
+            }
+            Ok(c)
+        });
+        match c {
+            Ok(c) => {
                 (self.cb.set)(&c);
                 self.seen = (self.cb.seq)();
             }
-            _ => eprintln!("clipboard from the other computer was unreadable or too big: not pasted here"),
+            Err(why) => eprintln!("clipboard from the other computer {why}: not pasted here"),
         }
     }
 }
@@ -238,9 +293,11 @@ fn stopped() -> io::Error {
 
 /// Send a big blob (from `Outgoing::Big`) over a transfer connection, then close our side.
 pub fn send_big(tx: &Sender, blob: &[u8], stop: &AtomicBool) -> io::Result<()> {
-    // Compressing 100 MB can outlast the receiver's timeout; heartbeats cover it.
+    // Reading and compressing 100 MB can outlast the receiver's timeout; heartbeats cover it.
     tx.spawn_heartbeat(crate::net::HEARTBEAT);
-    let sent = parts(&compress(blob)).try_for_each(|m| if stop.load(Ordering::SeqCst) { Err(stopped()) } else { tx.send(&m) });
+    let sent = with_files(blob).and_then(|blob| {
+        parts(&compress(&blob)).try_for_each(|m| if stop.load(Ordering::SeqCst) { Err(stopped()) } else { tx.send(&m) })
+    });
     tx.shutdown();
     sent
 }
@@ -275,7 +332,7 @@ fn win_seq() -> u32 {
 /// Each shared format's clipboard id, in the order apps see them: text
 /// before the image, so an app that takes both (Word, given cells copied from
 /// Excel) still pastes the text.
-fn formats() -> [(Format, u32); 4] {
+fn formats() -> [(Format, u32); 5] {
     unsafe {
         [
             (Format::Html, RegisterClipboardFormatW(w!("HTML Format"))),
@@ -284,8 +341,32 @@ fn formats() -> [(Format, u32); 4] {
             // Windows makes CF_DIBV5 from any bitmap on the clipboard, and the
             // other bitmap formats from it when we set it.
             (Format::Image, CF_DIBV5),
+            (Format::Files, CF_HDROP),
         ]
     }
+}
+
+/// The paths in a CF_HDROP: a DROPFILES (offset of the list at 0, wide flag
+/// at 16), then each path NUL-terminated, then one more NUL.
+// ponytail: only the wide (UTF-16) form, which everything since Windows 2000 writes.
+fn hdrop_paths(b: &[u8]) -> Option<Vec<PathBuf>> {
+    let at = |i: usize| b.get(i..i + 4).map(|x| u32::from_le_bytes(x.try_into().unwrap()));
+    if at(16)? == 0 {
+        return None;
+    }
+    let wide: Vec<u16> = b.get(at(0)? as usize..)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    Some(wide.split(|&c| c == 0).take_while(|p| !p.is_empty()).map(|p| PathBuf::from(String::from_utf16_lossy(p))).collect())
+}
+
+fn hdrop(paths: &[PathBuf]) -> Vec<u8> {
+    let mut b = vec![0u8; 20];
+    b[..4].copy_from_slice(&20u32.to_le_bytes());
+    b[16..20].copy_from_slice(&1u32.to_le_bytes());
+    for p in paths {
+        b.extend(p.to_string_lossy().encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+    }
+    b.extend([0, 0]);
+    b
 }
 
 /// Another program may hold the clipboard open for a moment, so retry briefly.
@@ -346,6 +427,10 @@ fn win_get() -> Contents {
             }
             Format::Html | Format::Rtf => bytes.into_iter().take_while(|&b| b != 0).collect(),
             Format::Image => bytes,
+            Format::Files => match hdrop_paths(&bytes) {
+                Some(p) if !p.is_empty() => files_entry(&p).1,
+                _ => continue,
+            },
         };
         out.push((format, data));
     }
@@ -366,6 +451,7 @@ fn win_set(c: &Contents) {
                 Format::Text => String::from_utf8_lossy(data).encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect(),
                 Format::Html | Format::Rtf => data.iter().copied().chain([0]).collect(),
                 Format::Image => data.clone(),
+                Format::Files => hdrop(&paths(data)),
             };
             put(id, &bytes);
         }
@@ -384,6 +470,17 @@ mod tests {
     }
 
     #[test]
+    fn file_lists_round_trip_through_hdrop() {
+        let p = vec![PathBuf::from(r"C:\Users\me\café.txt"), PathBuf::from(r"D:\folder")];
+        assert_eq!(hdrop_paths(&hdrop(&p)), Some(p.clone()));
+        assert_eq!(paths(&files_entry(&p).1), p);
+        let mut ansi = hdrop(&p);
+        ansi[16] = 0;
+        assert_eq!(hdrop_paths(&ansi), None, "the old ANSI form is not read");
+        assert_eq!(hdrop_paths(&[1, 2]), None, "too short");
+    }
+
+    #[test]
     fn blob_round_trips_skips_unknown_kinds_and_rejects_cuts() {
         let c = vec![(Format::Html, b"<b>hi</b>".to_vec()), (Format::Rtf, vec![]), text("hi"), (Format::Image, vec![1, 2])];
         let mut b = encode(&c);
@@ -392,8 +489,8 @@ mod tests {
         assert_eq!(decode(&b[..b.len() - 1]), None, "cut inside the data");
         b.extend([9, 1, 0, 0, 0, b'?']); // a kind from a newer version
         assert_eq!(decode(&b), Some(c.clone()));
-        assert_eq!(unpack(&compress(&b)), Some(c), "survives compression");
-        assert_eq!(unpack(b"not deflate"), None);
+        assert_eq!(unzip(&compress(&b)), Some(c), "survives compression");
+        assert_eq!(unzip(b"not deflate"), None);
     }
 
     /// Overwrites this computer's clipboard, so it only runs when asked:
@@ -423,6 +520,13 @@ mod tests {
         assert_eq!(got[..3], c[..3]);
         let (Format::Image, img) = &got[3] else { panic!("no image: {:?}", got.iter().map(|f| f.0).collect::<Vec<_>>()) };
         assert!(img.starts_with(&dib[..16]) && img.len() >= dib.len(), "the image reads back");
+
+        let file = std::env::temp_dir().join("input-share-real-clipboard.txt");
+        std::fs::write(&file, "x").unwrap();
+        let entry = files_entry(std::slice::from_ref(&file));
+        win_set(&vec![entry.clone()]);
+        assert_eq!(win_get(), vec![entry]);
+        let _ = std::fs::remove_file(file);
     }
 
     // A fake clipboard; only the next test uses it.
@@ -438,7 +542,12 @@ mod tests {
         BOARD.lock().unwrap().clone()
     }
 
-    const FAKE: Clipboard = Clipboard { seq: || SEQ.load(Ordering::SeqCst), get: board, set: |c| copy(c.clone()) };
+    const FAKE: Clipboard = Clipboard {
+        seq: || SEQ.load(Ordering::SeqCst),
+        get: board,
+        set: |c| copy(c.clone()),
+        received: || std::env::temp_dir().join(format!("input-share-test-fake-{}", std::process::id())),
+    };
 
     fn inline(o: Outgoing) -> Vec<Msg> {
         match o {
@@ -501,7 +610,12 @@ mod tests {
             *BOARD.lock().unwrap() = c;
             SEQ.fetch_add(1, Ordering::SeqCst);
         }
-        let fake = Clipboard { seq: || SEQ.load(Ordering::SeqCst), get: || BOARD.lock().unwrap().clone(), set: |c| copy(c.clone()) };
+        let fake = Clipboard {
+            seq: || SEQ.load(Ordering::SeqCst),
+            get: || BOARD.lock().unwrap().clone(),
+            set: |c| copy(c.clone()),
+            received: || std::env::temp_dir().join(format!("input-share-test-big-{}", std::process::id())),
+        };
         let image = vec![(Format::Image, vec![7; MAX_INLINE + 1])];
 
         let mut t = Tracker::new(fake);

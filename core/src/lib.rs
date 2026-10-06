@@ -4,6 +4,7 @@ pub mod config;
 pub mod cursor;
 pub mod discovery;
 pub mod edge;
+pub mod files;
 pub mod keys;
 pub mod layout;
 pub mod net;

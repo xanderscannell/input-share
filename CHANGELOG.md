@@ -14,7 +14,10 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
   copied on the computer it left can be pasted on the other one. Up to
   1 MB goes along with the crossing; anything bigger, up to 100 MB, follows
   on a second connection to the same port, so the pointer never waits for
-  it. Past 100 MB only the plain text is sent. Files are not shared yet.
+  it. Past 100 MB only the plain text is sent.
+- Copying files and folders, up to 100 MB in all. They arrive in
+  `%TEMP%\input-share-clipboard` and paste from there. Cut works as copy, and
+  links inside a folder are left out.
 
 ### Changed
 

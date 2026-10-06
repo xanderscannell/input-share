@@ -2,13 +2,14 @@
 // in-process over 127.0.0.1. Nothing touches the real mouse or keyboard.
 
 use input_share_core::client::{self, Act};
-use input_share_core::clipboard::Format;
+use input_share_core::clipboard::{self, Format};
 use input_share_core::edge::{Edge, Rect};
 use input_share_core::layout::Layout;
 use input_share_core::net::{self, keygen};
 use input_share_core::proto::Msg;
 use input_share_core::server::{self, Input};
 use input_share_core::status::{OnStatus, Status};
+use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -176,12 +177,17 @@ macro_rules! fake_clipboard {
             pub fn board() -> Contents {
                 BOARD.lock().unwrap().clone()
             }
-            pub const CLIP: Clipboard = Clipboard { seq: || SEQ.load(Ordering::SeqCst), get: board, set: |c| copy(c.clone()) };
+            pub fn received() -> std::path::PathBuf {
+                std::env::temp_dir().join(format!("input-share-test-{}-{}", stringify!($name), std::process::id()))
+            }
+            pub const CLIP: Clipboard = Clipboard { seq: || SEQ.load(Ordering::SeqCst), get: board, set: |c| copy(c.clone()), received };
         }
     };
 }
 fake_clipboard!(desk_clip);
 fake_clipboard!(laptop_clip);
+fake_clipboard!(desk_files);
+fake_clipboard!(laptop_files);
 
 /// Clipboards over 1 MB go on transfer connections: pulled by the laptop
 /// when control arrives, pushed by it when control returns.
@@ -213,4 +219,47 @@ fn big_clipboards_cross_both_ways_over_transfers() {
     server.stop();
     assert!(t.elapsed() < Duration::from_secs(2), "server stop took {:?}", t.elapsed());
     assert_port_free(&addr);
+}
+
+/// Copied files and folders cross both ways and paste from a folder of copies.
+#[test]
+fn files_and_folders_cross_both_ways() {
+    let src = std::env::temp_dir().join(format!("input-share-test-src-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&src);
+    fs::create_dir_all(src.join("folder/empty")).unwrap();
+    fs::write(src.join("notes.txt"), "hello").unwrap();
+    fs::write(src.join("folder/inner.bin"), [0u8, 1, 255]).unwrap();
+
+    let key = keygen();
+    let (s_on, s_log) = recorder();
+    let server =
+        server::start("127.0.0.1:0", key, Edge::Right, Layout::single(DESK), false, Some(desk_files::CLIP), s_on).unwrap();
+    let (c_on, c_log) = recorder();
+    let client =
+        client::start(&server.local_addr().to_string(), key, Edge::Right, laptop(), Box::new(|_| {}), Some(laptop_files::CLIP), c_on);
+    wait_for("server Connected", || has(&s_log, |s| matches!(s, Status::Connected(_))));
+
+    desk_files::copy(vec![clipboard::files_entry(&[src.join("notes.txt"), src.join("folder")])]);
+    server.input(Input::Move { x: 1919, y: 540 });
+    wait_for("client Remote", || has(&c_log, |s| *s == Status::Remote));
+    let here = laptop_files::received();
+    let pasted = vec![clipboard::files_entry(&[here.join("notes.txt"), here.join("folder")])];
+    wait_for("the files on the laptop's clipboard", || laptop_files::board() == pasted);
+    assert_eq!(fs::read_to_string(here.join("notes.txt")).unwrap(), "hello");
+    assert_eq!(fs::read(here.join("folder/inner.bin")).unwrap(), [0, 1, 255]);
+    assert!(here.join("folder/empty").is_dir());
+
+    laptop_files::copy(vec![clipboard::files_entry(&[here.join("folder")])]);
+    server.input(Input::Move { x: 960 - 50, y: 540 });
+    let there = desk_files::received();
+    wait_for("the folder on the desktop's clipboard", || {
+        desk_files::board() == vec![clipboard::files_entry(&[there.join("folder")])]
+    });
+    assert_eq!(fs::read(there.join("folder/inner.bin")).unwrap(), [0, 1, 255]);
+
+    client.stop();
+    server.stop();
+    for d in [src, here, there] {
+        let _ = fs::remove_dir_all(d);
+    }
 }
