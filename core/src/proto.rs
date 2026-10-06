@@ -24,6 +24,11 @@ pub enum Msg {
     /// Part of a clipboard (see `clipboard`), sent just before control
     /// crosses to the other computer. `last` marks the final part.
     Clipboard { last: bool, data: Vec<u8> },
+    /// Instead of Clipboard when it is big: a transfer will carry it.
+    Offer,
+    /// The first message on a transfer connection, instead of Hello. With
+    /// `pull`, the server sends its offered clipboard; else the client sends one.
+    Transfer { pull: bool },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +78,8 @@ impl Msg {
                 b.extend([9, last as u8]);
                 b.extend(data);
             }
+            Msg::Offer => b.push(10),
+            Msg::Transfer { pull } => b.extend([11, pull as u8]),
         }
         b
     }
@@ -88,6 +95,8 @@ impl Msg {
             7 => 4,
             8 => 0,
             9 => p.len().max(1), // any length, but the flag must be there
+            10 => 0,
+            11 => 1,
             _ => return Err(DecodeError::UnknownTag(tag)),
         };
         if p.len() != want {
@@ -120,6 +129,8 @@ impl Msg {
             6 => Msg::Wheel { vertical: bool_at(0)?, delta: i32_at(1) },
             7 => Msg::Key { scancode: u16_at(0), extended: bool_at(2)?, down: bool_at(3)? },
             9 => Msg::Clipboard { last: bool_at(0)?, data: p[1..].to_vec() },
+            10 => Msg::Offer,
+            11 => Msg::Transfer { pull: bool_at(0)? },
             _ => Msg::Heartbeat,
         })
     }
@@ -140,6 +151,8 @@ mod tests {
             Msg::Key { scancode: 0x1D, extended: true, down: false },
             Msg::Heartbeat,
             Msg::Clipboard { last: true, data: vec![0, 255, 7] },
+            Msg::Offer,
+            Msg::Transfer { pull: false },
         ]
     }
 
@@ -171,7 +184,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_tags_and_bad_values() {
-        for t in [0u8, 10, 255] {
+        for t in [0u8, 12, 255] {
             assert_eq!(Msg::decode(&[t]), Err(DecodeError::UnknownTag(t)));
         }
         assert_eq!(Msg::decode(&[5, 5, 0]), Err(DecodeError::BadValue));

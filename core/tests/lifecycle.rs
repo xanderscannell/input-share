@@ -2,6 +2,7 @@
 // in-process over 127.0.0.1. Nothing touches the real mouse or keyboard.
 
 use input_share_core::client::{self, Act};
+use input_share_core::clipboard::Format;
 use input_share_core::edge::{Edge, Rect};
 use input_share_core::layout::Layout;
 use input_share_core::net::{self, keygen};
@@ -46,7 +47,7 @@ fn has<T>(log: &Log<T>, f: impl Fn(&T) -> bool) -> bool {
 fn connected_with_a_held() -> (server::ServerHandle, client::ClientHandle, Log<Status>, Log<Status>, Log<Act>) {
     let key = keygen();
     let (s_on, s_log) = recorder();
-    let server = server::start("127.0.0.1:0", key, Edge::Right, Layout::single(DESK), false, s_on).unwrap();
+    let server = server::start("127.0.0.1:0", key, Edge::Right, Layout::single(DESK), false, None, s_on).unwrap();
     let addr = server.local_addr().to_string();
 
     let acts: Log<Act> = Default::default();
@@ -117,7 +118,7 @@ fn stopping_the_server_frees_the_port_and_releases_the_client() {
 #[test]
 fn stop_is_prompt_with_no_client() {
     let (s_on, s_log) = recorder();
-    let server = server::start("127.0.0.1:0", keygen(), Edge::Right, Layout::single(DESK), false, s_on).unwrap();
+    let server = server::start("127.0.0.1:0", keygen(), Edge::Right, Layout::single(DESK), false, None, s_on).unwrap();
     let addr = server.local_addr().to_string();
     assert_eq!(s_log.lock().unwrap().first(), Some(&Status::Listening(addr.clone())));
     let t = Instant::now();
@@ -150,11 +151,66 @@ fn finishes_within(limit: Duration, f: impl FnOnce() + Send + 'static) -> bool {
 fn stopping_the_server_is_prompt_even_if_the_client_never_closes() {
     let key = keygen();
     let (s_on, s_log) = recorder();
-    let server = server::start("127.0.0.1:0", key, Edge::Right, Layout::single(DESK), false, s_on).unwrap();
+    let server = server::start("127.0.0.1:0", key, Edge::Right, Layout::single(DESK), false, None, s_on).unwrap();
     let (tx, rx) = net::handshake(TcpStream::connect(server.local_addr()).unwrap(), &key, true).unwrap();
     tx.spawn_heartbeat(Duration::from_millis(100));
     wait_for("server Connected", || has(&s_log, |s| matches!(s, Status::Connected(_))));
 
     assert!(finishes_within(Duration::from_secs(3), move || server.stop()), "server stop waited on the client");
     drop((tx, rx));
+}
+
+/// A fake clipboard per computer, so a test never touches the real one.
+macro_rules! fake_clipboard {
+    ($name:ident) => {
+        mod $name {
+            use input_share_core::clipboard::{Clipboard, Contents};
+            use std::sync::Mutex;
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static SEQ: AtomicU32 = AtomicU32::new(0);
+            static BOARD: Mutex<Contents> = Mutex::new(Vec::new());
+            pub fn copy(c: Contents) {
+                *BOARD.lock().unwrap() = c;
+                SEQ.fetch_add(1, Ordering::SeqCst);
+            }
+            pub fn board() -> Contents {
+                BOARD.lock().unwrap().clone()
+            }
+            pub const CLIP: Clipboard = Clipboard { seq: || SEQ.load(Ordering::SeqCst), get: board, set: |c| copy(c.clone()) };
+        }
+    };
+}
+fake_clipboard!(desk_clip);
+fake_clipboard!(laptop_clip);
+
+/// Clipboards over 1 MB go on transfer connections: pulled by the laptop
+/// when control arrives, pushed by it when control returns.
+#[test]
+fn big_clipboards_cross_both_ways_over_transfers() {
+    let key = keygen();
+    let (s_on, s_log) = recorder();
+    let server =
+        server::start("127.0.0.1:0", key, Edge::Right, Layout::single(DESK), false, Some(desk_clip::CLIP), s_on).unwrap();
+    let addr = server.local_addr().to_string();
+    let (c_on, c_log) = recorder();
+    let client = client::start(&addr, key, Edge::Right, laptop(), Box::new(|_| {}), Some(laptop_clip::CLIP), c_on);
+    wait_for("server Connected", || has(&s_log, |s| matches!(s, Status::Connected(_))));
+
+    let image = vec![(Format::Image, (0..3u32 << 20).map(|i| (i % 251) as u8).collect::<Vec<_>>())];
+    desk_clip::copy(image.clone());
+    server.input(Input::Move { x: 1919, y: 540 });
+    wait_for("client Remote", || has(&c_log, |s| *s == Status::Remote));
+    wait_for("the image pulled to the laptop", || laptop_clip::board() == image);
+
+    let photo = vec![(Format::Image, vec![9; 2 << 20]), (Format::Text, b"caption".to_vec())];
+    laptop_clip::copy(photo.clone());
+    server.input(Input::Move { x: 960 - 50, y: 540 }); // parked at the center: 50 px left
+    wait_for("server Local", || has(&s_log, |s| *s == Status::Local));
+    wait_for("the photo pushed to the desktop", || desk_clip::board() == photo);
+
+    client.stop();
+    let t = Instant::now();
+    server.stop();
+    assert!(t.elapsed() < Duration::from_secs(2), "server stop took {:?}", t.elapsed());
+    assert_port_free(&addr);
 }

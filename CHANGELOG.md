@@ -9,11 +9,12 @@ in [docs/BUGS.md](docs/BUGS.md); a fix links its entry there.
 
 ### Added
 
-- Clipboard sharing for text and its formatting (HTML and RTF, as browsers,
-  Word and Outlook copy it). When the pointer crosses, what was copied on
-  the computer it left can be pasted on the other one. Up to 1 MB; past
-  that the formatting is dropped and the plain text sent alone. Images and
-  files are not shared yet.
+- Clipboard sharing for text, its formatting (HTML and RTF, as browsers,
+  Word and Outlook copy it) and images. When the pointer crosses, what was
+  copied on the computer it left can be pasted on the other one. Up to
+  1 MB goes along with the crossing; anything bigger, up to 100 MB, follows
+  on a second connection to the same port, so the pointer never waits for
+  it. Past 100 MB only the plain text is sent. Files are not shared yet.
 
 ### Changed
 

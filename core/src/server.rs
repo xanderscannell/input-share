@@ -5,7 +5,7 @@
 // wait on a channel. `on_input` does no I/O; outgoing messages go onto a
 // channel that a writer thread drains to the socket.
 
-use crate::clipboard::{self, Tracker};
+use crate::clipboard::{self, Clipboard, Outgoing, Tracker};
 use crate::edge::Edge;
 use crate::layout::Layout;
 use crate::keys::Held;
@@ -64,8 +64,12 @@ pub struct Server {
     /// Remote/Local changes, drained by a pump thread: `on_input` runs inside
     /// the hook and must never call out to a status callback directly.
     status: Option<mpsc::Sender<Status>>,
-    /// Real mode only: tests and demo mode never touch this computer's clipboard.
-    clipboard: Option<clipboard::Clipboard>,
+    /// None: never touch this computer's clipboard (scripts, demo mode).
+    clipboard: Option<Clipboard>,
+    /// The running session's clipboard, for its transfers.
+    clip: Option<Arc<Mutex<Tracker>>>,
+    /// A session is running (or starting): one client at a time.
+    in_session: bool,
 }
 
 impl Server {
@@ -79,6 +83,8 @@ impl Server {
             phys: Held::default(),
             status: None,
             clipboard: None,
+            clip: None,
+            in_session: false,
         }
     }
 
@@ -181,22 +187,24 @@ impl Server {
 
 type Shared = Arc<Mutex<Server>>;
 
-/// One client session. Returns when the connection ends, for any reason.
+/// One client session, from the client's first message on. Returns when the
+/// connection ends, for any reason.
+#[allow(clippy::too_many_arguments)] // one per thing a session uses; a struct would only rename them
 fn session(
     shared: &Shared,
-    stream: TcpStream,
-    key: &Key,
+    peer: SocketAddr,
+    tx: net::Sender,
+    mut rx: net::Receiver,
+    first: Msg,
     set_cursor: fn(i32, i32),
     stop: &AtomicBool,
     on_status: &OnStatus,
 ) -> io::Result<()> {
-    let peer = stream.peer_addr()?;
-    let (tx, mut rx) = net::handshake(stream, key, false)?;
     let (desk, cb) = {
         let s = shared.lock().unwrap();
         (s.layout.bounds(), s.clipboard)
     };
-    let clip = Arc::new(Mutex::new(cb.map(Tracker::new)));
+    let clip = cb.map(|cb| Arc::new(Mutex::new(Tracker::new(cb))));
     tx.send(&Msg::Hello { version: VERSION, w: desk.w, h: desk.h })?;
     tx.spawn_heartbeat(net::HEARTBEAT);
 
@@ -207,9 +215,16 @@ fn session(
             for m in queue {
                 // The clipboard goes ahead of control. Read here, never in the
                 // hook that queued the Enter.
-                if matches!(m, Msg::Enter { .. }) {
-                    let parts = clip.lock().unwrap().as_mut().map(Tracker::outgoing).unwrap_or_default();
-                    if parts.iter().any(|p| tx.send(p).is_err()) {
+                if matches!(m, Msg::Enter { .. })
+                    && let Some(c) = &clip
+                {
+                    let out = c.lock().unwrap().outgoing();
+                    let sent = match out {
+                        Outgoing::Nothing => Ok(()),
+                        Outgoing::Inline(parts) => parts.iter().try_for_each(|p| tx.send(p)),
+                        Outgoing::Big(_) => tx.send(&Msg::Offer), // the client pulls it from `big`
+                    };
+                    if sent.is_err() {
                         break;
                     }
                 }
@@ -228,11 +243,12 @@ fn session(
             return Ok(());
         }
         s.out = Some(out);
+        s.clip = clip.clone();
     }
     on_status(Status::Connected(peer.to_string()));
 
+    let mut m = Ok(first);
     let res = loop {
-        let m = rx.recv();
         // Ending the session must not depend on the client closing (BUG-004):
         // a client that stays alive keeps this read going with heartbeats.
         if stop.load(Ordering::SeqCst) {
@@ -246,8 +262,14 @@ fn session(
                 }
             }
             Ok(Msg::Clipboard { last, data }) => {
-                if let Some(c) = clip.lock().unwrap().as_mut() {
-                    c.incoming(last, data);
+                if let Some(c) = &clip {
+                    c.lock().unwrap().incoming(last, data);
+                }
+            }
+            Ok(Msg::Offer) => {
+                // The client pushes it over a transfer, which reads `awaited`.
+                if let Some(c) = &clip {
+                    c.lock().unwrap().offered();
                 }
             }
             Ok(Msg::Hello { version, .. }) if version != VERSION => {
@@ -256,10 +278,84 @@ fn session(
             Ok(_) => {}
             Err(e) => break Err(e),
         }
+        m = rx.recv();
     };
-    shared.lock().unwrap().disconnect();
+    {
+        let mut s = shared.lock().unwrap();
+        s.disconnect();
+        s.clip = None;
+    }
+    if let Some(c) = &clip {
+        c.lock().unwrap().end();
+    }
     let _ = writer.join();
     res
+}
+
+/// A clipboard transfer for the running session: the client pulls the
+/// server's big clipboard, or pushes its own.
+fn transfer(shared: &Shared, tx: &net::Sender, rx: &mut net::Receiver, pull: bool, stop: &AtomicBool) -> io::Result<()> {
+    let clip = shared.lock().unwrap().clip.clone().ok_or_else(|| io::Error::other("no session to transfer for"))?;
+    if pull {
+        let blob = clip.lock().unwrap().big.clone().ok_or_else(|| io::Error::other("nothing offered"))?;
+        clipboard::send_big(tx, &blob, stop)
+    } else {
+        // ponytail: assumes the session read the Offer before this transfer
+        // began (it is sent first); a push that wins that race is dropped.
+        let generation = clip.lock().unwrap().awaited;
+        let z = clipboard::recv_big(rx, stop)?;
+        clip.lock().unwrap().finish(generation, &z);
+        Ok(())
+    }
+}
+
+/// One accepted connection: a session, or a transfer for the session. The
+/// client's first message says which.
+fn connection(
+    stream: TcpStream,
+    shared: &Shared,
+    key: &Key,
+    set_cursor: fn(i32, i32),
+    stop: &AtomicBool,
+    on_status: &OnStatus,
+) {
+    let opened = (|| {
+        stream.set_nonblocking(false)?;
+        // A peer that stops reading must not block a send (and so `stop`) forever.
+        stream.set_write_timeout(Some(net::TIMEOUT))?;
+        let peer = stream.peer_addr()?;
+        let (tx, mut rx) = net::handshake(stream, key, false)?;
+        let first = rx.recv()?;
+        io::Result::Ok((peer, tx, rx, first))
+    })();
+    let reason = match opened {
+        Ok((_, tx, mut rx, Msg::Transfer { pull })) => {
+            if let Err(e) = transfer(shared, &tx, &mut rx, pull, stop) {
+                eprintln!("clipboard transfer: {e}");
+            }
+            tx.shutdown(); // send_big did already, on a pull
+            return;
+        }
+        Ok((peer, tx, rx, first)) => {
+            {
+                let mut s = shared.lock().unwrap();
+                if s.in_session {
+                    // ponytail: one client at a time; another one retries until this one ends.
+                    eprintln!("{peer}: already controlling another computer");
+                    return;
+                }
+                s.in_session = true;
+            }
+            let r = session(shared, peer, tx, rx, first, set_cursor, stop, on_status);
+            shared.lock().unwrap().in_session = false;
+            match r {
+                Ok(()) => "closed".to_string(),
+                Err(e) => e.to_string(),
+            }
+        }
+        Err(e) => e.to_string(),
+    };
+    on_status(Status::Disconnected(reason));
 }
 
 fn accept_loop(
@@ -270,22 +366,21 @@ fn accept_loop(
     stop: Arc<AtomicBool>,
     on_status: OnStatus,
 ) {
-    // ponytail: one client at a time; a second connection waits until the first ends.
-    // The listener is non-blocking so this loop can notice `stop` between clients.
+    // The listener is non-blocking so this loop can notice `stop`.
+    let mut conns: Vec<JoinHandle<()>> = Vec::new();
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
-                let reason = match stream.set_nonblocking(false) {
-                    Ok(()) => match session(&shared, stream, &key, set_cursor, &stop, &on_status) {
-                        Ok(()) => "closed".to_string(),
-                        Err(e) => e.to_string(),
-                    },
-                    Err(e) => e.to_string(),
-                };
-                on_status(Status::Disconnected(reason));
+                let (shared, stop, on_status) = (shared.clone(), stop.clone(), on_status.clone());
+                conns.push(thread::spawn(move || connection(stream, &shared, &key, set_cursor, &stop, &on_status)));
             }
             Err(_) => thread::sleep(Duration::from_millis(50)),
         }
+        conns.retain(|c| !c.is_finished());
+    }
+    // Sessions and transfers see `stop` within a heartbeat or a chunk.
+    for c in conns {
+        let _ = c.join();
     }
 }
 
@@ -303,9 +398,17 @@ pub struct ServerHandle {
 }
 
 /// Bind and accept clients on a background thread. With `hooks`, also install
-/// the low-level hooks (real input), re-read the monitor layout every 2 s and
-/// share the clipboard; without, feed input through `input()`.
-pub fn start(bind: &str, key: Key, edge: Edge, layout: Layout, hooks: bool, on_status: OnStatus) -> io::Result<ServerHandle> {
+/// the low-level hooks (real input) and re-read the monitor layout every 2 s;
+/// without, feed input through `input()`. `clipboard`: share this one.
+pub fn start(
+    bind: &str,
+    key: Key,
+    edge: Edge,
+    layout: Layout,
+    hooks: bool,
+    clipboard: Option<Clipboard>,
+    on_status: OnStatus,
+) -> io::Result<ServerHandle> {
     let listener = TcpListener::bind(bind)?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
@@ -315,7 +418,7 @@ pub fn start(bind: &str, key: Key, edge: Edge, layout: Layout, hooks: bool, on_s
     {
         let mut s = shared.lock().unwrap();
         s.status = Some(status_tx);
-        s.clipboard = hooks.then_some(clipboard::WINDOWS);
+        s.clipboard = clipboard;
     }
     // Real mode hides the parked cursor while Remote. Restore first, in case an
     // earlier run crashed with it hidden. The pump does it (never the hook):
@@ -433,7 +536,7 @@ impl Drop for ServerHandle {
 /// Server with a scripted fake input source instead of hooks.
 pub fn run_script(bind: &str, key: Key, edge: Edge, layout: Layout, script: &Path, on_status: OnStatus) -> io::Result<()> {
     let cmds = parse_script(&std::fs::read_to_string(script)?)?;
-    let server = start(bind, key, edge, layout, false, on_status)?;
+    let server = start(bind, key, edge, layout, false, None, on_status)?;
     for cmd in cmds {
         match cmd {
             Cmd::Input(ev) => {
@@ -755,7 +858,7 @@ fn spawn_hooks(shared: Shared) -> io::Result<(u32, JoinHandle<()>)> {
 
 /// Real server for the CLI: hooks until the process ends.
 pub fn run_hooks(bind: &str, key: Key, edge: Edge, layout: Layout, on_status: OnStatus) -> io::Result<()> {
-    let _server = start(bind, key, edge, layout, true, on_status)?;
+    let _server = start(bind, key, edge, layout, true, Some(clipboard::WINDOWS), on_status)?;
     println!("hooks installed; panic hotkey is Ctrl+Alt+Shift+Esc");
     loop {
         thread::park();

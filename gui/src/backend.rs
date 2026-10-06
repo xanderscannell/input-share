@@ -153,7 +153,7 @@ impl Backend {
         }
         let key = self.key()?;
         if self.demo {
-            let s = server::start("127.0.0.1:0", key, self.edge(), Layout::single(DEMO_SCREEN), false, self.on_status.clone())
+            let s = server::start("127.0.0.1:0", key, self.edge(), Layout::single(DEMO_SCREEN), false, None, self.on_status.clone())
                 .map_err(err)?;
             let addr = s.local_addr().to_string();
             self.server = Some(s);
@@ -162,7 +162,7 @@ impl Backend {
 
         // Real: hooks on, listening on the LAN, beaconing so clients can find us.
         let port = self.port();
-        let s = server::start(&format!("0.0.0.0:{port}"), key, self.edge(), win::layout(), true, self.on_status.clone())
+        let s = server::start(&format!("0.0.0.0:{port}"), key, self.edge(), win::layout(), true, Some(clipboard::WINDOWS), self.on_status.clone())
             .map_err(|e| match e.kind() {
                 std::io::ErrorKind::AddrInUse => format!("Port {port} is already in use. Choose another in Settings."),
                 _ => e.to_string(),
@@ -202,7 +202,7 @@ impl Backend {
         let key = self.key()?;
         let listener = discovery::listen("127.0.0.1:0".parse().unwrap()).map_err(err)?;
         let to = listener.local_addr();
-        let peer = server::start("127.0.0.1:0", key, self.edge(), Layout::single(DEMO_SCREEN), false, Arc::new(|_| {}))
+        let peer = server::start("127.0.0.1:0", key, self.edge(), Layout::single(DEMO_SCREEN), false, None, Arc::new(|_| {}))
             .map_err(err)?;
         let paired = discovery::announce(
             "127.0.0.1:0".parse().unwrap(),

@@ -1652,6 +1652,7 @@ name = "input-share-core"
 version = "0.1.1"
 dependencies = [
  "blake2",
+ "miniz_oxide 0.8.9",
  "snow",
  "windows",
 ]

@@ -2,7 +2,7 @@
 // injected input. Injection goes through a sink so `--dry-run` can print
 // instead of calling SendInput.
 
-use crate::clipboard::{Clipboard, Tracker};
+use crate::clipboard::{self, Clipboard, Outgoing, Tracker};
 use crate::edge::Edge;
 use crate::layout::{ClientCursor, Layout, Step};
 use crate::keys::Held;
@@ -10,7 +10,7 @@ use crate::net::{self, Key};
 use crate::proto::{Button, Msg, VERSION};
 use crate::status::{OnStatus, Status};
 use std::io;
-use std::net::{Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
@@ -257,7 +257,7 @@ fn session(
     tx.spawn_heartbeat(net::HEARTBEAT);
 
     let mut held = Held::default();
-    let mut clip = clipboard.map(Tracker::new);
+    let clip = clipboard.map(|cb| Arc::new(Mutex::new(Tracker::new(cb))));
     let mut cursor: Option<ClientCursor> = None;
     let res = loop {
         let m = match rx.recv() {
@@ -294,8 +294,13 @@ fn session(
                         on_status(Status::Local);
                         release_all(&mut held, sink);
                         // The clipboard goes ahead of control.
-                        let parts = clip.as_mut().map(Tracker::outgoing).unwrap_or_default();
-                        if let Err(e) = parts.iter().try_for_each(|p| tx.send(p)) {
+                        let out = clip.as_ref().map_or(Outgoing::Nothing, |c| c.lock().unwrap().outgoing());
+                        let sent = match out {
+                            Outgoing::Nothing => Ok(()),
+                            Outgoing::Inline(parts) => parts.iter().try_for_each(|p| tx.send(p)),
+                            Outgoing::Big(blob) => tx.send(&Msg::Offer).map(|()| push(peer, *key, blob)),
+                        };
+                        if let Err(e) = sent {
                             break Err(e);
                         }
                         if let Err(e) = tx.send(&Msg::Leave { y_frac }) {
@@ -305,8 +310,14 @@ fn session(
                 }
             }
             Msg::Clipboard { last, data } => {
-                if let Some(c) = &mut clip {
-                    c.incoming(last, data);
+                if let Some(c) = &clip {
+                    c.lock().unwrap().incoming(last, data);
+                }
+            }
+            Msg::Offer => {
+                if let Some(c) = &clip {
+                    let generation = c.lock().unwrap().offered();
+                    pull(peer, *key, c.clone(), generation);
                 }
             }
             Msg::Key { .. } | Msg::Button { .. } | Msg::Wheel { .. } => {
@@ -316,12 +327,53 @@ fn session(
             _ => {}
         }
     };
+    if let Some(c) = &clip {
+        c.lock().unwrap().end();
+    }
     if cursor.is_some() {
         on_status(Status::Local);
     }
     release_all(&mut held, sink);
     tx.shutdown();
     res
+}
+
+/// Open a transfer connection to the server, for one big clipboard.
+fn open_transfer(peer: SocketAddr, key: &Key, pull: bool) -> io::Result<(net::Sender, net::Receiver)> {
+    let stream = TcpStream::connect_timeout(&peer, Duration::from_secs(2))?;
+    stream.set_write_timeout(Some(net::TIMEOUT))?;
+    let (tx, rx) = net::handshake(stream, key, true)?;
+    tx.send(&Msg::Transfer { pull })?;
+    Ok((tx, rx))
+}
+
+// Transfers run on their own threads, so a big clipboard never holds up input.
+// ponytail: detached; one still running when the client stops ends on its own
+// within a few seconds (`Tracker::end` keeps it from pasting). Join them if that matters.
+
+/// Send our big clipboard to the server, after the Offer.
+fn push(peer: SocketAddr, key: Key, blob: Arc<Vec<u8>>) {
+    thread::spawn(move || {
+        let r = open_transfer(peer, &key, false).and_then(|(tx, _rx)| clipboard::send_big(&tx, &blob, &AtomicBool::new(false)));
+        if let Err(e) = r {
+            eprintln!("clipboard push: {e}");
+        }
+    });
+}
+
+/// Fetch the server's big clipboard, which it offered.
+fn pull(peer: SocketAddr, key: Key, clip: Arc<Mutex<Tracker>>, generation: u64) {
+    thread::spawn(move || {
+        let r = open_transfer(peer, &key, true).and_then(|(tx, mut rx)| {
+            let z = clipboard::recv_big(&mut rx, &AtomicBool::new(false))?;
+            tx.shutdown();
+            clip.lock().unwrap().finish(generation, &z);
+            Ok(())
+        });
+        if let Err(e) = r {
+            eprintln!("clipboard pull: {e}");
+        }
+    });
 }
 
 #[cfg(test)]

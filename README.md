@@ -20,12 +20,13 @@ encrypted end to end, with a tray app on top.
 - **Crossing:** the pointer moves between the two screens at the edge you
   choose, landing at the same relative height. Layouts with several monitors
   of different sizes are handled monitor by monitor.
-- **Clipboard:** text you copy on one computer can be pasted on the other
-  once the pointer crosses, with its formatting (bold, links, tables) when
-  copied from a browser, Word or Outlook. Only what you copied since the
-  session started crosses, so an image on the other side is never replaced
-  with stale text. Up to 1 MB: past that the formatting is dropped and the
-  plain text sent alone, if it fits.
+- **Clipboard:** text and images you copy on one computer can be pasted on
+  the other once the pointer crosses, with formatting (bold, links, tables)
+  when copied from a browser, Word or Outlook. Only what you copied since
+  the session started crosses, so crossing back never replaces the other
+  computer's clipboard with stale contents. Up to 100 MB: a big image
+  arrives a moment after the pointer, without holding it up. Past 100 MB
+  only the plain text is sent, if it fits.
 - **Encrypted and paired:** every keystroke travels encrypted (Noise
   `NNpsk0` with a 256-bit shared key). A computer without your key cannot
   read or send input.
@@ -121,7 +122,7 @@ For trying things out without touching the real mouse and keyboard:
 
 | Port | Protocol | Used for |
 |---|---|---|
-| 24800 | TCP | The encrypted session (changeable in Settings or with `--bind`) |
+| 24800 | TCP | The encrypted session, and a second connection for each big clipboard (changeable in Settings or with `--bind`) |
 | 24801 | UDP | Discovery beacons (broadcast on the local network) |
 
 - The session uses Noise `NNpsk0_25519_ChaChaPoly_BLAKE2s`. Without the shared
@@ -149,8 +150,8 @@ These come from Windows, not from bugs:
   side also runs as administrator.
 - The lock screen, Ctrl+Alt+Del and UAC prompts are on a secure desktop that
   no program can inject into.
-- One computer controlled at a time. The clipboard shares text and its
-  formatting, not images or files, and there is no file drag yet.
+- One computer controlled at a time. The clipboard shares text, formatting
+  and images, not files, and there is no file drag yet.
 
 ## Development
 
